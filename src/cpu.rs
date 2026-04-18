@@ -1,0 +1,681 @@
+use crate::memory_bus::MemoryBus;
+
+//struct to hold 16 registers: 0-12 general purpose, 13 stack pointer,
+// 14 link register, 15 program counter
+// CPSR flags stored as a single 32-bit
+pub struct CPU {
+    pub registers: [u32; 16],
+    pub cpsr: u32,
+}
+
+impl CPU {
+    //init cpu instance
+    pub fn new() -> CPU {
+        CPU {
+            registers: [0; 16],
+            cpsr: 0,
+        }
+    }
+
+    fn check_flags(&mut self, instruction: u32) -> bool {
+        let condition = (instruction >> 28) & 0xF;
+        let n = (self.cpsr >> 31) & 1 == 1;
+        let z = (self.cpsr >> 30) & 1 == 1;
+        let c = (self.cpsr >> 29) & 1 == 1;
+        let v = (self.cpsr >> 28) & 1 == 1;
+
+        match condition {
+            0b0000 => z,
+            0b0001 => !z,
+            0b0010 => c,
+            0b0011 => !c,
+            0b0100 => n,
+            0b0101 => !n,
+            0b0110 => v,
+            0b0111 => !v,
+            0b1000 => c && !z,
+            0b1001 => !c || z,
+            0b1010 => n == v,
+            0b1011 => n != v,
+            0b1100 => !z && (n == v),
+            0b1101 => z || (n != v),
+            0b1110 => true,
+            _ => todo!(),
+        }
+    }
+
+    //executes instructions
+    pub fn execute_instruction(&mut self, bus: &mut MemoryBus, instruction: u32) {
+        if !self.check_flags(instruction) {
+            return;
+        }
+
+        let bits_27_24 = (instruction >> 24) & 0xF;
+        match bits_27_24 {
+            0b1111 => self.execute_swi(instruction),
+            _ => {
+                let bits_27_25 = (instruction >> 25) & 0b111;
+                match bits_27_25 {
+                    0b010 | 0b011 => self.execute_ldr_str(bus, instruction),
+                    0b000 | 0b001 => {
+                        if (instruction >> 23) & 0b11 == 0b10 && (instruction >> 20) & 1 == 0b0 {
+                            self.execute_psr(instruction);
+                        } else {
+                            self.decode_alu(instruction);
+                        }
+                    }
+                    0b101 => self.decode_branch(instruction),
+                    0b100 => self.decode_memory(bus, instruction),
+                    _ => {
+                        println!(
+                            "unimplemented instruction: {:#034b} at PC: {:#010x}",
+                            instruction, self.registers[15]
+                        );
+                        todo!()
+                    }
+                }
+            }
+        }
+    }
+
+    fn decode_memory(&mut self, bus: &mut MemoryBus, instruction: u32) {
+        let base = (instruction >> 16) & 0xF;
+        let rn = self.registers[base as usize];
+
+        let rlist = instruction & 0xFFFF;
+        let p = (instruction >> 24) & 1; // pre-index
+        let u = (instruction >> 23) & 1; // up (1) or down (0)
+        let write_back = (instruction >> 21) & 1;
+        let load = (instruction >> 20) & 1;
+
+        // ARM always stores the lowest-numbered register at the lowest address.
+        // Compute the lowest address we'll use, then walk upward through the list.
+        let count = (0..16).filter(|i| (rlist >> i) & 1 == 1).count() as u32;
+        let mut address = if u == 1 {
+            if p == 1 { rn.wrapping_add(4) } else { rn } // IB / IA
+        } else {
+            if p == 1 {
+                rn.wrapping_sub(count * 4)
+            }
+            // DB (STMDB / LDMDB)
+            else {
+                rn.wrapping_sub(count * 4).wrapping_add(4)
+            } // DA
+        };
+
+        for i in 0..16usize {
+            if (rlist >> i) & 1 == 1 {
+                if load == 1 {
+                    self.registers[i] = bus.read_u32(address);
+                } else {
+                    bus.write_u32(address, self.registers[i]);
+                }
+                address = address.wrapping_add(4);
+            }
+        }
+
+        if write_back == 1 {
+            self.registers[base as usize] = if u == 1 {
+                rn.wrapping_add(count * 4)
+            } else {
+                rn.wrapping_sub(count * 4)
+            };
+        }
+    }
+
+    fn execute_ldr_str(&mut self, bus: &mut MemoryBus, instruction: u32) {
+        let is_register = (instruction >> 25) & 1;
+        let offset;
+        if is_register == 0 {
+            offset = instruction & 0xFFF;
+        } else {
+            let register_flag = (instruction >> 4) & 1;
+            if register_flag == 0b0 {
+                let shift = (instruction >> 7) & 0x1F;
+                let source_register = instruction & 0xF;
+
+                let rm = self.registers[source_register as usize];
+                offset = match (instruction >> 5) & 0b11 {
+                    0b0 => rm << shift,
+                    0b1 => rm >> shift,
+                    0b10 => ((rm as i32) >> shift) as u32,
+                    0b11 => rm.rotate_right(shift),
+                    _ => todo!(),
+                };
+            } else {
+                let register = self.registers[((instruction >> 8) & 0xF) as usize];
+                let shift = register & 0xFF;
+
+                let source_register = instruction & 0xF;
+
+                let rm = self.registers[source_register as usize];
+                offset = match (instruction >> 5) & 0b11 {
+                    0b0 => rm,
+                    0b1 => rm >> shift,
+                    0b10 => ((rm as i32) >> shift) as u32,
+                    0b11 => rm.rotate_right(shift),
+                    _ => todo!(),
+                };
+            }
+        }
+        let u = (instruction >> 23) & 1;
+        let p = (instruction >> 24) & 1;
+        let w = (instruction >> 21) & 1;
+        let l = (instruction >> 20) & 1;
+        let b = (instruction >> 22) & 1; // byte or word
+
+        let base_idx = ((instruction >> 16) & 0xF) as usize;
+        let rd_idx = ((instruction >> 12) & 0xF) as usize;
+
+        let rn = self.registers[base_idx];
+
+        // Step 1: compute offset address (but DON'T apply post yet)
+        let offset_addr = if u == 1 {
+            rn.wrapping_add(offset)
+        } else {
+            rn.wrapping_sub(offset)
+        };
+
+        // Step 2: choose address depending on P
+        let address = if p == 1 {
+            offset_addr // pre-indexed
+        } else {
+            rn // post-indexed uses original rn
+        };
+
+        // Step 3: perform memory access
+        if l == 1 {
+            // LDR
+            println!("LDR address: {:#010x}", address);
+            if b == 1 {
+                self.registers[rd_idx] = bus.read_u8(address) as u32;
+            } else {
+                self.registers[rd_idx] = bus.read_u32(address);
+            }
+        } else {
+            // STR
+            let value = self.registers[rd_idx];
+            if b == 1 {
+                bus.write_u8(address, value as u8);
+            } else {
+                bus.write_u32(address, value);
+            }
+        }
+
+        // Step 4: write-back
+        if p == 0 {
+            // post-index: ALWAYS write-back
+            self.registers[base_idx] = offset_addr;
+        } else if w == 1 {
+            // pre-index: optional write-back
+            self.registers[base_idx] = offset_addr;
+        }
+    }
+
+    //decomposes alu instructions and executes on registers
+    fn decode_alu(&mut self, instruction: u32) {
+        let opcode = (instruction >> 21) & 0xF;
+
+        match opcode {
+            0xD => self.execute_mov(instruction),
+            0b100 => self.execute_add(instruction),
+            0b10 => self.execute_sub(instruction),
+            0xA => self.execute_cmp(instruction),
+            0b1001 => self.execute_teq(instruction),
+            0b0000 => self.execute_and(instruction),
+            0b1100 => self.execute_orr(instruction),
+            0b1110 => self.execute_bic(instruction),
+            0x8 => self.execute_tst(instruction),
+            0xF => self.execute_mvn(instruction),
+            0x5 => self.execute_adc(instruction),
+            0x6 => self.execute_subc(instruction),
+            0x1 => self.execute_xor(instruction),
+            0x3 => self.execute_rsb(instruction),
+            0x7 => self.execute_rsc(instruction),
+            0xB => self.execute_cmn(instruction),
+            _ => {
+                println!(
+                    "unimplemented ALU opcode: {:#06b}",
+                    (instruction >> 21) & 0xF
+                );
+                todo!()
+            }
+        }
+    }
+
+    fn execute_psr(&mut self, instruction: u32) {
+        println!("PSR instruction: {:#010x}", instruction);
+        let i = (instruction >> 25) & 1; //immediate op flag
+        let source_dest = (instruction >> 22) & 1; //Source/Destination PSR  (0=CPSR, 1=SPSR_<current mode>)
+        let opcode = (instruction >> 21) & 1; //opcode: 1 = MSR: ;Psr[field] = Op, 0 = MRS: ;Rd = Psr
+
+        if opcode == 1 {
+            //MSR - write to PSR
+            let value = if i == 1 {
+                let ror = (instruction >> 8) & 0xF;
+                (instruction & 0xFF).rotate_right(ror * 2)
+            } else {
+                self.registers[(instruction & 0xF) as usize]
+            };
+
+            if (instruction >> 19) & 1 == 1 {
+                //flags
+                self.cpsr = (self.cpsr & 0x00FFFFFF) | (value & 0xFF000000);
+            }
+
+            if (instruction >> 16) & 1 == 1 {
+                //control flag
+                self.cpsr = (self.cpsr & 0xFFFFFF00) | (value & 0x000000FF);
+            }
+        } else {
+            //MRS - read from psr to register
+            let rd = (instruction >> 12) & 0xF;
+            self.registers[rd as usize] = if source_dest == 0 {
+                self.cpsr
+            } else {
+                self.cpsr
+            }
+        }
+    }
+
+    //B label
+    //BL label
+    fn decode_branch(&mut self, instruction: u32) {
+        let mut offset = (instruction & 0x00FFFFFF) << 2;
+        offset = ((offset << 6) as i32 >> 6) as u32;
+
+        if (instruction >> 24) & 1 == 1 {
+            self.registers[14] = self.registers[15];
+        }
+
+        self.registers[15] = self.registers[15].wrapping_add(offset).wrapping_add(4);
+    }
+
+    fn execute_swi(&mut self, instruction: u32) {
+        let swi_number = (instruction >> 16) & 0xFF;
+        match swi_number {
+            0x06 => {
+                //div
+                let num = self.registers[0];
+                let denom = self.registers[1];
+                self.registers[0] = num / denom;
+                self.registers[1] = num % denom;
+                self.registers[2] = ((num / denom) as i32).abs() as u32;
+            }
+            _ => todo!("SWI {:#04x}", swi_number),
+        }
+    }
+
+    fn apply_shift(
+        &self,
+        rm: u32,
+        shift_type: u32,
+        shift: u32,
+        carry_in: bool,
+        is_register: bool,
+    ) -> (u32, bool) {
+        match shift_type {
+            0b00 => match shift {
+                // LSL
+                0 => (rm, carry_in),
+                1..=31 => (rm << shift, (rm >> (32 - shift)) & 1 == 1),
+                32 => (0, rm & 1 == 1),
+                _ => (0, false),
+            },
+            0b01 => match shift {
+                // LSR
+                0 => {
+                    if is_register {
+                        (rm, carry_in)
+                    } else {
+                        (0, (rm >> 31) & 1 == 1)
+                    }
+                }
+                1..=31 => (rm >> shift, (rm >> (shift - 1)) & 1 == 1),
+                32 => (0, (rm >> 31) & 1 == 1),
+                _ => (0, false),
+            },
+            0b10 => match shift {
+                // ASR
+                0 => {
+                    if is_register {
+                        (rm, carry_in)
+                    } else {
+                        (((rm as i32) >> 31) as u32, (rm >> 31) & 1 == 1)
+                    }
+                }
+                1..=31 => (((rm as i32) >> shift) as u32, (rm >> (shift - 1)) & 1 == 1),
+                _ => (((rm as i32) >> 31) as u32, (rm >> 31) & 1 == 1),
+            },
+            0b11 => match shift {
+                // ROR
+                0 => {
+                    if is_register {
+                        (rm, carry_in) // register ROR#0 = no shift
+                    } else {
+                        (((carry_in as u32) << 31) | (rm >> 1), rm & 1 == 1) // immediate ROR#0 = RRX
+                    }
+                } // RRX
+                _ => {
+                    let s = shift % 32;
+                    if s == 0 {
+                        (rm, (rm >> 31) & 1 == 1)
+                    } else {
+                        (rm.rotate_right(s), (rm >> (s - 1)) & 1 == 1)
+                    }
+                }
+            },
+            _ => (rm, carry_in),
+        }
+    }
+
+    //decodes operand between loading as an immediate value or deducing from a register
+    fn decode_op2(&mut self, instruction: u32) -> (u32, bool) {
+        println!("decode_op2: {:#010x}", instruction);
+        let op_flag = (instruction >> 25) & 1;
+        let carry_in = (self.cpsr >> 29) & 1 == 1;
+
+        if op_flag == 1 {
+            let ror_shift = (instruction >> 8) & 0xF;
+            let value = (instruction & 0xFF).rotate_right(ror_shift * 2);
+            let carry = if ror_shift == 0 {
+                (self.cpsr >> 29) & 1 == 1 // preserve carry if no rotation
+            } else {
+                (value >> 31) & 1 == 1 // carry = bit 31 of rotated result
+            };
+            (value, carry)
+        } else {
+            let shift_type = (instruction >> 5) & 0b11;
+            let source_register = instruction & 0xF;
+            let rm = self.registers[source_register as usize];
+
+            let shift = if (instruction >> 4) & 1 == 0 {
+                // shift by immediate
+                (instruction >> 7) & 0x1F
+            } else {
+                // shift by register — bottom byte only
+                self.registers[((instruction >> 8) & 0xF) as usize] & 0xFF
+            };
+
+            let is_register = (instruction >> 4) & 1 == 1;
+            self.apply_shift(rm, shift_type, shift, carry_in, is_register)
+        }
+    }
+
+    fn set_flags(&mut self, n: bool, z: bool, c: bool, v: bool) {
+        if n {
+            self.cpsr |= 1 << 31
+        } else {
+            self.cpsr &= !(1 << 31)
+        }
+        if z {
+            self.cpsr |= 1 << 30
+        } else {
+            self.cpsr &= !(1 << 30)
+        }
+        if c {
+            self.cpsr |= 1 << 29
+        } else {
+            self.cpsr &= !(1 << 29)
+        }
+        if v {
+            self.cpsr |= 1 << 28
+        } else {
+            self.cpsr &= !(1 << 28)
+        }
+    }
+
+    fn sub_flags(&self, rn: u32, op2: u32) -> (bool, bool, bool, bool) {
+        let result = rn.wrapping_sub(op2);
+        let rn_sign = (rn >> 31) & 1;
+        let op2_sign = (op2 >> 31) & 1;
+        let result_sign = (result >> 31) & 1;
+
+        let n: bool = (result >> 31) == 1;
+        let z: bool = result == 0;
+        let c: bool = rn >= op2;
+        let v: bool = (rn_sign == 0 && op2_sign == 1 && result_sign == 1)
+            || (rn_sign == 1 && op2_sign == 0 && result_sign == 0);
+
+        (n, z, c, v)
+    }
+
+    fn add_flags(&self, rn: u32, op2: u32) -> (bool, bool, bool, bool) {
+        let result = rn.wrapping_add(op2);
+        let n: bool = (result >> 31) == 1;
+        let z: bool = result == 0;
+        let c: bool = (rn as u64) + (op2 as u64) > 0xFFFFFFFF;
+
+        let rn_sign = (rn >> 31) & 1;
+        let op2_sign = (op2 >> 31) & 1;
+        let result_sign = (result >> 31) & 1;
+
+        let v = (rn_sign == 0 && op2_sign == 0 && result_sign == 1)
+            || (rn_sign == 1 && op2_sign == 1 && result_sign == 0);
+
+        (n, z, c, v)
+    }
+
+    fn logical_flags(&self, result: u32, carry: bool) -> (bool, bool, bool, bool) {
+        let n = (result >> 31) == 1;
+        let z = result == 0;
+        let c = carry; // only affected by shift, handle later
+        let v = false; // never affected by logical ops
+        (n, z, c, v)
+    }
+
+    //MOV rd, op2
+    fn execute_mov(&mut self, instruction: u32) {
+        let dest_register = (instruction >> 12) & 0xF;
+        let (op2, carry) = self.decode_op2(instruction);
+        //execute mov instruction
+        self.registers[dest_register as usize] = op2;
+
+        if (instruction >> 20) & 1 == 1 {
+            let (n, z, c, v) = self.logical_flags(op2, carry);
+            self.set_flags(n, z, c, v);
+        }
+    }
+
+    //ADD Rd, Rn, op2
+    fn execute_add(&mut self, instruction: u32) {
+        let dest_register = (instruction >> 12) & 0xF;
+        let rn = self.registers[(instruction >> 16) as usize & 0xF];
+        let (op2, carry) = self.decode_op2(instruction);
+        self.registers[dest_register as usize] = rn.wrapping_add(op2);
+
+        if (instruction >> 20) & 1 == 1 {
+            let (n, z, c, v) = self.add_flags(rn, op2);
+            self.set_flags(n, z, c, v);
+        }
+    }
+
+    //SUB rd, rn, op2
+    fn execute_sub(&mut self, instruction: u32) {
+        let dest_register = (instruction >> 12) & 0xF;
+        let rn = self.registers[(instruction >> 16) as usize & 0xF];
+        let (op2, carry) = self.decode_op2(instruction);
+        self.registers[dest_register as usize] = rn.wrapping_sub(op2);
+
+        if (instruction >> 20) & 1 == 1 {
+            let (n, z, c, v) = self.sub_flags(rn, op2);
+            self.set_flags(n, z, c, v);
+        }
+    }
+
+    //CMP rn, op2
+    fn execute_cmp(&mut self, instruction: u32) {
+        let rn = self.registers[(instruction >> 16) as usize & 0xF];
+        let (op2, carry) = self.decode_op2(instruction);
+        let (n, z, c, v) = self.sub_flags(rn, op2);
+        self.set_flags(n, z, c, v);
+    }
+
+    fn execute_cmn(&mut self, instruction: u32) {
+        let rn = self.registers[(instruction >> 16) as usize & 0xF];
+        let (op2, carry) = self.decode_op2(instruction);
+        let (n, z, c, v) = self.add_flags(rn, op2);
+        self.set_flags(n, z, c, v);
+    }
+
+    fn execute_teq(&mut self, instruction: u32) {
+        let rn = self.registers[(instruction >> 16) as usize & 0xF];
+        let (op2, carry) = self.decode_op2(instruction);
+        let result = rn ^ op2;
+
+        let (n, z, c, v) = self.logical_flags(result, carry);
+        self.set_flags(n, z, c, v);
+    }
+
+    fn execute_and(&mut self, instruction: u32) {
+        let rd = (instruction >> 12) & 0xF;
+        let rn = self.registers[(instruction >> 16) as usize & 0xF];
+        let (op2, carry) = self.decode_op2(instruction);
+        let result = rn & op2;
+        self.registers[rd as usize] = result;
+
+        if (instruction >> 20) & 1 == 1 {
+            let (n, z, c, v) = self.logical_flags(result, carry);
+            self.set_flags(n, z, c, v);
+        }
+    }
+
+    fn execute_orr(&mut self, instruction: u32) {
+        let rd = (instruction >> 12) & 0xF;
+        let rn = self.registers[(instruction >> 16) as usize & 0xF];
+        let (op2, carry) = self.decode_op2(instruction);
+        let result = rn | op2;
+        self.registers[rd as usize] = rn | op2;
+
+        if (instruction >> 20) & 1 == 1 {
+            let (n, z, c, v) = self.logical_flags(result, carry);
+            self.set_flags(n, z, c, v);
+        }
+    }
+
+    fn execute_bic(&mut self, instruction: u32) {
+        let rd = (instruction >> 12) & 0xF;
+        let rn = self.registers[(instruction >> 16) as usize & 0xF];
+        let (op2, carry) = self.decode_op2(instruction);
+        let result = rn & (!op2);
+        self.registers[rd as usize] = result;
+
+        if (instruction >> 20) & 1 == 1 {
+            let (n, z, c, v) = self.logical_flags(result, carry);
+            self.set_flags(n, z, c, v);
+        }
+    }
+
+    fn execute_tst(&mut self, instruction: u32) {
+        let rn = self.registers[(instruction >> 16) as usize & 0xF];
+        let (op2, carry) = self.decode_op2(instruction);
+        let result = rn & op2;
+
+        let (n, z, c, v) = self.logical_flags(result, carry);
+        self.set_flags(n, z, c, v);
+    }
+
+    fn execute_mvn(&mut self, instruction: u32) {
+        let rd = (instruction >> 12) & 0xF;
+        let (op2, carry) = self.decode_op2(instruction);
+        let result = !op2;
+        self.registers[rd as usize] = result;
+
+        if (instruction >> 20) & 1 == 1 {
+            let (n, z, c, v) = self.logical_flags(result, carry);
+            self.set_flags(n, z, c, v);
+        }
+    }
+
+    fn execute_adc(&mut self, instruction: u32) {
+        let rn = self.registers[((instruction >> 16) & 0xF) as usize];
+        let rd = (instruction >> 12) & 0xF;
+        let (op2, carry) = self.decode_op2(instruction);
+        let carry = (self.cpsr >> 29) & 1;
+        self.registers[rd as usize] = rn.wrapping_add(op2).wrapping_add(carry);
+
+        if (instruction >> 20) & 1 == 1 {
+            let (n, z, c, v) = self.adc_flags(rn, op2, carry);
+            self.set_flags(n, z, c, v);
+        }
+    }
+
+    fn adc_flags(&self, rn: u32, op2: u32, carry: u32) -> (bool, bool, bool, bool) {
+        let result = rn.wrapping_add(op2).wrapping_add(carry);
+        let n = (result >> 31) == 1;
+        let z = result == 0;
+        let c = (rn as u64) + (op2 as u64) + (carry as u64) > 0xFFFFFFFF;
+        let rn_sign = (rn >> 31) & 1;
+        let op2_sign = (op2 >> 31) & 1;
+        let result_sign = (result >> 31) & 1;
+        let v = (rn_sign == 0 && op2_sign == 0 && result_sign == 1)
+            || (rn_sign == 1 && op2_sign == 1 && result_sign == 0);
+        (n, z, c, v)
+    }
+
+    fn sbc_flags(&self, rn: u32, op2: u32, carry: u32) -> (bool, bool, bool, bool) {
+        let result = rn.wrapping_sub(op2).wrapping_add(carry).wrapping_sub(1);
+        let n = (result >> 31) == 1;
+        let z = result == 0;
+        let c = (rn as u64) >= (op2 as u64) + (1 - carry as u64);
+        let rn_sign = (rn >> 31) & 1;
+        let op2_sign = (op2 >> 31) & 1;
+        let result_sign = (result >> 31) & 1;
+        let v = (rn_sign == 1 && op2_sign == 0 && result_sign == 0)
+            || (rn_sign == 0 && op2_sign == 1 && result_sign == 1);
+        (n, z, c, v)
+    }
+
+    fn execute_subc(&mut self, instruction: u32) {
+        let rn = self.registers[((instruction >> 16) & 0xF) as usize];
+        let rd = (instruction >> 12) & 0xF;
+        let (op2, carry) = self.decode_op2(instruction);
+        let carry = (self.cpsr >> 29) & 1;
+        self.registers[rd as usize] = rn.wrapping_sub(op2).wrapping_add(carry).wrapping_sub(1);
+
+        if (instruction >> 20) & 1 == 1 {
+            let (n, z, c, v) = self.sbc_flags(rn, op2, carry);
+            self.set_flags(n, z, c, v);
+        }
+    }
+
+    fn execute_xor(&mut self, instruction: u32) {
+        let rd = (instruction >> 12) & 0xF;
+        let rn = self.registers[(instruction >> 16) as usize & 0xF];
+        let (op2, carry) = self.decode_op2(instruction);
+        let result = rn ^ op2;
+        self.registers[rd as usize] = result;
+
+        if (instruction >> 20) & 1 == 1 {
+            let (n, z, c, v) = self.logical_flags(result, carry);
+            self.set_flags(n, z, c, v);
+        }
+    }
+
+    fn execute_rsb(&mut self, instruction: u32) {
+        let rd = (instruction >> 12) & 0xF;
+        let rn = self.registers[(instruction >> 16) as usize & 0xF];
+        let (op2, carry) = self.decode_op2(instruction);
+        let carry = (self.cpsr >> 29) & 1;
+        let result = op2 - rn;
+        self.registers[rd as usize] = result;
+
+        if (instruction >> 20) & 1 == 1 {
+            let (n, z, c, v) = self.sub_flags(result, carry);
+            self.set_flags(n, z, c, v);
+        }
+    }
+
+    fn execute_rsc(&mut self, instruction: u32) {
+        let rn = self.registers[((instruction >> 16) & 0xF) as usize];
+        let rd = (instruction >> 12) & 0xF;
+        let (op2, carry) = self.decode_op2(instruction);
+        let carry = (self.cpsr >> 29) & 1;
+        self.registers[rd as usize] = op2.wrapping_sub(rn).wrapping_add(carry).wrapping_sub(1);
+
+        if (instruction >> 20) & 1 == 1 {
+            let (n, z, c, v) = self.sbc_flags(rn, op2, carry);
+            self.set_flags(n, z, c, v);
+        }
+    }
+}
