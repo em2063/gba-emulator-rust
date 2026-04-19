@@ -58,10 +58,15 @@ impl CPU {
                 match bits_27_25 {
                     0b010 | 0b011 => self.execute_ldr_str(bus, instruction),
                     0b000 | 0b001 => {
-                        if (instruction >> 23) & 0b11 == 0b10 && (instruction >> 20) & 1 == 0b0 {
-                            self.execute_psr(instruction);
+                        if (instruction >> 8) & 0xFFFFF == 0b00010010111111111111 {
+                            self.decode_branch_exchange(instruction);
                         } else {
-                            self.decode_alu(instruction);
+                            if (instruction >> 23) & 0b11 == 0b10 && (instruction >> 20) & 1 == 0b0
+                            {
+                                self.execute_psr(instruction);
+                            } else {
+                                self.decode_alu(instruction);
+                            }
                         }
                     }
                     0b101 => self.decode_branch(instruction),
@@ -291,6 +296,28 @@ impl CPU {
         self.registers[15] = self.registers[15].wrapping_add(offset).wrapping_add(4);
     }
 
+    fn decode_branch_exchange(&mut self, instruction: u32) {
+        let opcode = (instruction >> 4) & 0xF;
+        let rn = (instruction) & 0xF;
+        match opcode {
+            0b0001 => {
+                let target = self.registers[rn as usize];
+                let thumb = target & 1;
+                if thumb == 1 {
+                    self.cpsr |= 1 << 5;
+                } else {
+                    self.cpsr &= !(1 << 5);
+                }
+                self.registers[15] = target & !1;
+            }
+            0b0011 => {
+                print!("BLX - todo\n");
+                todo!();
+            }
+            _ => todo!(),
+        }
+    }
+
     fn execute_swi(&mut self, instruction: u32) {
         let swi_number = (instruction >> 16) & 0xFF;
         match swi_number {
@@ -306,7 +333,7 @@ impl CPU {
         }
     }
 
-    fn apply_shift(
+    pub fn apply_shift(
         &self,
         rm: u32,
         shift_type: u32,
@@ -402,7 +429,7 @@ impl CPU {
         }
     }
 
-    fn set_flags(&mut self, n: bool, z: bool, c: bool, v: bool) {
+    pub fn set_flags(&mut self, n: bool, z: bool, c: bool, v: bool) {
         if n {
             self.cpsr |= 1 << 31
         } else {
@@ -456,7 +483,7 @@ impl CPU {
         (n, z, c, v)
     }
 
-    fn logical_flags(&self, result: u32, carry: bool) -> (bool, bool, bool, bool) {
+    pub fn logical_flags(&self, result: u32, carry: bool) -> (bool, bool, bool, bool) {
         let n = (result >> 31) == 1;
         let z = result == 0;
         let c = carry; // only affected by shift, handle later

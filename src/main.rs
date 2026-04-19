@@ -1,5 +1,6 @@
 mod cpu;
 mod memory_bus;
+mod thumb;
 
 fn main() {
     let rom: Vec<u8> = std::fs::read("arm.gba").unwrap();
@@ -18,8 +19,25 @@ fn main() {
         }
 
         let pc = cpu.registers[15];
-        let instruction = bus.read_u32(cpu.registers[15]);
-        println!("PC: {:#010x} instruction: {:#010x}", pc, instruction);
+        let t_flag = (cpu.cpsr >> 5) & 1;
+
+        if t_flag == 1 {
+            print!("CHANGED TO THUMB SET");
+            let instruction = bus.read_u16(cpu.registers[15]);
+        } else {
+            let instruction = bus.read_u32(cpu.registers[15]);
+            println!("PC: {:#010x} instruction: {:#010x}", pc, instruction);
+
+            if instruction == 0xEAFFFFFE {
+                register_debug(instruction, pc, cpu);
+                break;
+            }
+            cpu.registers[15] = cpu.registers[15].wrapping_add(4);
+            cpu.execute_instruction(&mut bus, instruction);
+        }
+    }
+
+    fn register_debug(instruction: u32, pc: u32, cpu: cpu::CPU) {
         if instruction == 0xEAFFFFFE {
             println!("halted at PC: {:#010x}", pc);
             println!("Registers at halt:");
@@ -27,9 +45,6 @@ fn main() {
                 println!("R{}: {:#010x}", i, cpu.registers[i]);
             }
             println!("CPSR: {:#010x}", cpu.cpsr);
-            break;
         }
-        cpu.registers[15] = cpu.registers[15].wrapping_add(4);
-        cpu.execute_instruction(&mut bus, instruction);
     }
 }

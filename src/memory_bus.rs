@@ -1,3 +1,5 @@
+use std::string::FromUtf16Error;
+
 pub struct MemoryBus {
     rom: Vec<u8>,
     bios: [u8; 16 * 1024],   //system rom
@@ -75,5 +77,11 @@ impl MemoryBus {
             0x0E000000..=0x0E00FFFF => self.sram[(addr - 0x0E000000) as usize] = value,
             _ => {}
         };
+    }
+
+    pub fn read_u16(&mut self, addr: u32) -> u16 {
+        let b0 = self.read_u8(addr) as u16;
+        let b1 = self.read_u8(addr.wrapping_add(1)) as u16;
+        b0 | (b1 << 8)
     }
 }
