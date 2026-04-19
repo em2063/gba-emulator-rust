@@ -452,7 +452,7 @@ impl CPU {
         }
     }
 
-    fn sub_flags(&self, rn: u32, op2: u32) -> (bool, bool, bool, bool) {
+    pub fn sub_flags(&self, rn: u32, op2: u32) -> (bool, bool, bool, bool) {
         let result = rn.wrapping_sub(op2);
         let rn_sign = (rn >> 31) & 1;
         let op2_sign = (op2 >> 31) & 1;
@@ -467,7 +467,7 @@ impl CPU {
         (n, z, c, v)
     }
 
-    fn add_flags(&self, rn: u32, op2: u32) -> (bool, bool, bool, bool) {
+    pub fn add_flags(&self, rn: u32, op2: u32) -> (bool, bool, bool, bool) {
         let result = rn.wrapping_add(op2);
         let n: bool = (result >> 31) == 1;
         let z: bool = result == 0;
@@ -627,7 +627,7 @@ impl CPU {
         }
     }
 
-    fn adc_flags(&self, rn: u32, op2: u32, carry: u32) -> (bool, bool, bool, bool) {
+    pub fn adc_flags(&self, rn: u32, op2: u32, carry: u32) -> (bool, bool, bool, bool) {
         let result = rn.wrapping_add(op2).wrapping_add(carry);
         let n = (result >> 31) == 1;
         let z = result == 0;
@@ -640,7 +640,7 @@ impl CPU {
         (n, z, c, v)
     }
 
-    fn sbc_flags(&self, rn: u32, op2: u32, carry: u32) -> (bool, bool, bool, bool) {
+    pub fn sbc_flags(&self, rn: u32, op2: u32, carry: u32) -> (bool, bool, bool, bool) {
         let result = rn.wrapping_sub(op2).wrapping_add(carry).wrapping_sub(1);
         let n = (result >> 31) == 1;
         let z = result == 0;
