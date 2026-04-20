@@ -19,14 +19,24 @@ impl CPU {
             }
             0b001 => self.execute_mov_cmp_add_sub(instruction),
             _ => {
-                let bits_15_11 = (instruction >> 11) & 0b11111;
-                match bits_15_11 {
-                    0b11110 | 0b11111 | 0b11101 => self.excecute_bl_with_long_offset(instruction),
+                let bits_15_12 = (instruction >> 12) & 0xF;
+                match bits_15_12 {
+                    0b1101 => self.execute_conditional_branch(instruction),
+                    0b1100 => self.execute_multiple_ldr_str(bus, instruction),
                     _ => {
-                        let bits_15_10 = (instruction >> 10) & 0b111111;
-                        match bits_15_10 {
-                            0b010000 => self.decode_thumb_alu(instruction),
-                            _ => todo!(),
+                        let bits_15_11 = (instruction >> 11) & 0b11111;
+                        match bits_15_11 {
+                            0b11110 | 0b11111 | 0b11101 => {
+                                self.excecute_bl_with_long_offset(instruction)
+                            }
+                            0b11100 => self.execute_unconditional_branch(instruction),
+                            _ => {
+                                let bits_15_10 = (instruction >> 10) & 0b111111;
+                                match bits_15_10 {
+                                    0b010000 => self.decode_thumb_alu(instruction),
+                                    _ => todo!(),
+                                }
+                            }
                         }
                     }
                 }
@@ -36,7 +46,6 @@ impl CPU {
 
     //THUMB.1 move shifted register
     fn execute_thumb_move_shifted(&mut self, instruction: u16) {
-        print!("THUMB.1");
         let offset = (instruction >> 6) & 0b11111;
         let rs = (instruction >> 3) & 0b111;
         let rd = instruction & 0b111;
@@ -54,8 +63,6 @@ impl CPU {
 
     //THUMB.2 add/subtract
     fn execute_add_subtract(&mut self, instruction: u16) {
-        print!("THUMB.2");
-
         let opcode = (instruction >> 9) & 0b11;
         let rs = (instruction >> 3) & 0b111;
         let rd = instruction & 0b111;
@@ -284,6 +291,46 @@ impl CPU {
         }
     }
 
+    //THUMB.15 multiple load/store
+    fn execute_multiple_ldr_str(&mut self, bus: &mut MemoryBus, instruction: u16) {
+        let base = (instruction >> 8) & 0b111;
+        let rb = self.registers[base as usize];
+        let mut address = rb;
+
+        let rlist = instruction & 0xFF;
+        let count = (0..8).filter(|i| (rlist >> i) & 1 == 1).count() as u16;
+        let opcode = (instruction >> 11) & 1;
+
+        for i in 0..8usize {
+            if (rlist >> i) & 1 == 1 {
+                if opcode == 1 {
+                    self.registers[i] = bus.read_u32(address);
+                } else {
+                    bus.write_u32(address, self.registers[i]);
+                }
+                address = address.wrapping_add(4);
+            }
+        }
+
+        let base_idx = ((instruction >> 8) & 0b111) as usize;
+        self.registers[base_idx] = rb.wrapping_add(count as u32 * 4)
+    }
+
+    //THUMB.16 jumps and calls (conditional branching)
+    fn execute_conditional_branch(&mut self, instruction: u16) {
+        let opcode = ((instruction >> 8) & 0xF) as u32;
+        if self.check_condition(opcode) {
+            let offset = (instruction & 0xFF) as i8 as i32;
+            self.registers[15] = (self.registers[15] as i32 + (offset << 1)) as u32;
+        }
+    }
+
+    //THUMB.18 unconditional branch (B)
+    fn execute_unconditional_branch(&mut self, instruction: u16) {
+        let offset = ((instruction & 0x7FF) as i16) << 5 >> 5;
+        self.registers[15] = (self.registers[15] as i32 + ((offset as i32) << 1)) as u32;
+    }
+
     //THUMB.19 long branch with link
     //This may be used to call (or jump) to a subroutine, return address is saved in LR (R14).
     //Unlike all other THUMB mode instructions,
@@ -314,7 +361,5 @@ impl CPU {
             }
             _ => todo!(),
         }
-
-        //instruction 2
     }
 }

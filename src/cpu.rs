@@ -17,8 +17,7 @@ impl CPU {
         }
     }
 
-    fn check_flags(&mut self, instruction: u32) -> bool {
-        let condition = (instruction >> 28) & 0xF;
+    pub fn check_condition(&mut self, condition: u32) -> bool {
         let n = (self.cpsr >> 31) & 1 == 1;
         let z = (self.cpsr >> 30) & 1 == 1;
         let c = (self.cpsr >> 29) & 1 == 1;
@@ -42,6 +41,10 @@ impl CPU {
             0b1110 => true,
             _ => todo!(),
         }
+    }
+
+    fn check_flags(&mut self, instruction: u32) -> bool {
+        self.check_condition((instruction >> 28) & 0xF)
     }
 
     //executes instructions
