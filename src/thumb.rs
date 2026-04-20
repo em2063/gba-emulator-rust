@@ -7,6 +7,7 @@ use crate::memory_bus::MemoryBus;
 impl CPU {
     //execute 16-bit thumb instructions
     pub fn execute_thumb_instruction(&mut self, bus: &mut MemoryBus, instruction: u16) {
+        println!("THUMB dispatch: {:#018b}", instruction);
         let bits_13_15 = (instruction >> 13) & 0b111;
         match bits_13_15 {
             0b000 => {
@@ -18,10 +19,16 @@ impl CPU {
             }
             0b001 => self.execute_mov_cmp_add_sub(instruction),
             _ => {
-                let bits_15_10 = (instruction >> 10) & 0b111111;
-                match bits_15_10 {
-                    0b010000 => self.decode_thumb_alu(instruction),
-                    _ => todo!(),
+                let bits_15_11 = (instruction >> 11) & 0b11111;
+                match bits_15_11 {
+                    0b11110 | 0b11111 | 0b11101 => self.excecute_bl_with_long_offset(instruction),
+                    _ => {
+                        let bits_15_10 = (instruction >> 10) & 0b111111;
+                        match bits_15_10 {
+                            0b010000 => self.decode_thumb_alu(instruction),
+                            _ => todo!(),
+                        }
+                    }
                 }
             }
         }
@@ -275,5 +282,39 @@ impl CPU {
             }
             _ => todo!(),
         }
+    }
+
+    //THUMB.19 long branch with link
+    //This may be used to call (or jump) to a subroutine, return address is saved in LR (R14).
+    //Unlike all other THUMB mode instructions,
+    //this instruction occupies 32bit of memory which are split into two 16bit THUMB opcodes
+    fn excecute_bl_with_long_offset(&mut self, instruction: u16) {
+        //Instruction 1
+        let opcode = (instruction >> 11) & 0b11111;
+        match opcode {
+            0b11110 => {
+                let nn = (instruction & 0x7FF) as u32;
+                let nn_signed = ((nn << 21) as i32 >> 21) as u32;
+                self.registers[14] = self.registers[15]
+                    .wrapping_add(2)
+                    .wrapping_add((nn_signed as u32) << 12);
+            }
+            0b11111 => {
+                let nn = (instruction & 0x7FF) as u32;
+                let temp = self.registers[15].wrapping_add(2) | 1;
+                self.registers[15] = self.registers[14].wrapping_add(nn << 1);
+                self.registers[14] = temp;
+            }
+            0b11101 => {
+                let nn = (instruction & 0x7FF) as u32;
+                let temp = self.registers[15].wrapping_add(2) | 1;
+                self.registers[15] = self.registers[14].wrapping_add(nn << 1) & !1; //clear bit 0
+                self.registers[14] = temp;
+                self.cpsr &= !(1 << 5); //clear T flag — switch to ARM mode
+            }
+            _ => todo!(),
+        }
+
+        //instruction 2
     }
 }

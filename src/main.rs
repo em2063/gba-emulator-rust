@@ -22,7 +22,6 @@ fn main() {
         let t_flag = (cpu.cpsr >> 5) & 1;
 
         if t_flag == 1 {
-            print!("CHANGED TO THUMB SET\n");
             let instruction = bus.read_u16(cpu.registers[15]);
             println!("PC: {:#010x} THUMB instruction: {:#010x}", pc, instruction);
 

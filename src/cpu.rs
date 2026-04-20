@@ -139,7 +139,7 @@ impl CPU {
                 let shift = (instruction >> 7) & 0x1F;
                 let source_register = instruction & 0xF;
 
-                let rm = self.registers[source_register as usize];
+                let rm = self.read_register(source_register);
                 offset = match (instruction >> 5) & 0b11 {
                     0b0 => rm << shift,
                     0b1 => rm >> shift,
@@ -153,7 +153,7 @@ impl CPU {
 
                 let source_register = instruction & 0xF;
 
-                let rm = self.registers[source_register as usize];
+                let rm = self.read_register(source_register);
                 offset = match (instruction >> 5) & 0b11 {
                     0b0 => rm,
                     0b1 => rm >> shift,
@@ -302,6 +302,7 @@ impl CPU {
         match opcode {
             0b0001 => {
                 let target = self.registers[rn as usize];
+                print!("Target: {}\n", target);
                 let thumb = target & 1;
                 if thumb == 1 {
                     self.cpsr |= 1 << 5;
@@ -414,7 +415,7 @@ impl CPU {
         } else {
             let shift_type = (instruction >> 5) & 0b11;
             let source_register = instruction & 0xF;
-            let rm = self.registers[source_register as usize];
+            let rm = self.read_register(source_register);
 
             let shift = if (instruction >> 4) & 1 == 0 {
                 // shift by immediate
@@ -426,6 +427,14 @@ impl CPU {
 
             let is_register = (instruction >> 4) & 1 == 1;
             self.apply_shift(rm, shift_type, shift, carry_in, is_register)
+        }
+    }
+
+    fn read_register(&self, index: u32) -> u32 {
+        if index == 15 {
+            self.registers[15].wrapping_add(4)
+        } else {
+            self.registers[index as usize]
         }
     }
 
@@ -507,7 +516,7 @@ impl CPU {
     //ADD Rd, Rn, op2
     fn execute_add(&mut self, instruction: u32) {
         let dest_register = (instruction >> 12) & 0xF;
-        let rn = self.registers[(instruction >> 16) as usize & 0xF];
+        let rn = self.read_register((instruction >> 16) & 0xF);
         let (op2, carry) = self.decode_op2(instruction);
         self.registers[dest_register as usize] = rn.wrapping_add(op2);
 
@@ -520,7 +529,8 @@ impl CPU {
     //SUB rd, rn, op2
     fn execute_sub(&mut self, instruction: u32) {
         let dest_register = (instruction >> 12) & 0xF;
-        let rn = self.registers[(instruction >> 16) as usize & 0xF];
+        let rn = self.read_register((instruction >> 16) & 0xF);
+
         let (op2, carry) = self.decode_op2(instruction);
         self.registers[dest_register as usize] = rn.wrapping_sub(op2);
 
@@ -532,21 +542,21 @@ impl CPU {
 
     //CMP rn, op2
     fn execute_cmp(&mut self, instruction: u32) {
-        let rn = self.registers[(instruction >> 16) as usize & 0xF];
+        let rn = self.read_register((instruction >> 16) & 0xF);
         let (op2, carry) = self.decode_op2(instruction);
         let (n, z, c, v) = self.sub_flags(rn, op2);
         self.set_flags(n, z, c, v);
     }
 
     fn execute_cmn(&mut self, instruction: u32) {
-        let rn = self.registers[(instruction >> 16) as usize & 0xF];
+        let rn = self.read_register((instruction >> 16) & 0xF);
         let (op2, carry) = self.decode_op2(instruction);
         let (n, z, c, v) = self.add_flags(rn, op2);
         self.set_flags(n, z, c, v);
     }
 
     fn execute_teq(&mut self, instruction: u32) {
-        let rn = self.registers[(instruction >> 16) as usize & 0xF];
+        let rn = self.read_register((instruction >> 16) & 0xF);
         let (op2, carry) = self.decode_op2(instruction);
         let result = rn ^ op2;
 
@@ -556,7 +566,7 @@ impl CPU {
 
     fn execute_and(&mut self, instruction: u32) {
         let rd = (instruction >> 12) & 0xF;
-        let rn = self.registers[(instruction >> 16) as usize & 0xF];
+        let rn = self.read_register((instruction >> 16) & 0xF);
         let (op2, carry) = self.decode_op2(instruction);
         let result = rn & op2;
         self.registers[rd as usize] = result;
@@ -569,7 +579,7 @@ impl CPU {
 
     fn execute_orr(&mut self, instruction: u32) {
         let rd = (instruction >> 12) & 0xF;
-        let rn = self.registers[(instruction >> 16) as usize & 0xF];
+        let rn = self.read_register((instruction >> 16) & 0xF);
         let (op2, carry) = self.decode_op2(instruction);
         let result = rn | op2;
         self.registers[rd as usize] = rn | op2;
@@ -582,7 +592,7 @@ impl CPU {
 
     fn execute_bic(&mut self, instruction: u32) {
         let rd = (instruction >> 12) & 0xF;
-        let rn = self.registers[(instruction >> 16) as usize & 0xF];
+        let rn = self.read_register((instruction >> 16) & 0xF);
         let (op2, carry) = self.decode_op2(instruction);
         let result = rn & (!op2);
         self.registers[rd as usize] = result;
@@ -594,7 +604,7 @@ impl CPU {
     }
 
     fn execute_tst(&mut self, instruction: u32) {
-        let rn = self.registers[(instruction >> 16) as usize & 0xF];
+        let rn = self.read_register((instruction >> 16) & 0xF);
         let (op2, carry) = self.decode_op2(instruction);
         let result = rn & op2;
 
@@ -615,7 +625,7 @@ impl CPU {
     }
 
     fn execute_adc(&mut self, instruction: u32) {
-        let rn = self.registers[((instruction >> 16) & 0xF) as usize];
+        let rn = self.read_register((instruction >> 16) & 0xF);
         let rd = (instruction >> 12) & 0xF;
         let (op2, carry) = self.decode_op2(instruction);
         let carry = (self.cpsr >> 29) & 1;
@@ -654,7 +664,7 @@ impl CPU {
     }
 
     fn execute_subc(&mut self, instruction: u32) {
-        let rn = self.registers[((instruction >> 16) & 0xF) as usize];
+        let rn = self.read_register((instruction >> 16) & 0xF);
         let rd = (instruction >> 12) & 0xF;
         let (op2, carry) = self.decode_op2(instruction);
         let carry = (self.cpsr >> 29) & 1;
@@ -668,7 +678,7 @@ impl CPU {
 
     fn execute_xor(&mut self, instruction: u32) {
         let rd = (instruction >> 12) & 0xF;
-        let rn = self.registers[(instruction >> 16) as usize & 0xF];
+        let rn = self.read_register((instruction >> 16) & 0xF);
         let (op2, carry) = self.decode_op2(instruction);
         let result = rn ^ op2;
         self.registers[rd as usize] = result;
@@ -681,7 +691,7 @@ impl CPU {
 
     fn execute_rsb(&mut self, instruction: u32) {
         let rd = (instruction >> 12) & 0xF;
-        let rn = self.registers[(instruction >> 16) as usize & 0xF];
+        let rn = self.read_register((instruction >> 16) & 0xF);
         let (op2, carry) = self.decode_op2(instruction);
         let carry = (self.cpsr >> 29) & 1;
         let result = op2 - rn;
@@ -694,7 +704,7 @@ impl CPU {
     }
 
     fn execute_rsc(&mut self, instruction: u32) {
-        let rn = self.registers[((instruction >> 16) & 0xF) as usize];
+        let rn = self.read_register((instruction >> 16) & 0xF);
         let rd = (instruction >> 12) & 0xF;
         let (op2, carry) = self.decode_op2(instruction);
         let carry = (self.cpsr >> 29) & 1;
