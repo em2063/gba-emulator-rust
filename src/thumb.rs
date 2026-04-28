@@ -24,6 +24,8 @@ impl CPU {
                     0b1101 => self.execute_conditional_branch(instruction),
                     0b1100 => self.execute_multiple_ldr_str(bus, instruction),
                     0b1000 => self.execute_ldr_str_halfword(bus, instruction),
+                    0b1010 => self.execute_get_relative_address(instruction),
+                    0b1001 => self.execute_ldr_str_sp_relative(bus, instruction),
                     _ => {
                         let bits_15_11 = (instruction >> 11) & 0b11111;
                         match bits_15_11 {
@@ -308,6 +310,32 @@ impl CPU {
         }
     }
 
+    //THUMB.11 load/store SP-relative
+    fn execute_ldr_str_sp_relative(&mut self, bus: &mut MemoryBus, instruction: u16) {
+        let rd = (instruction >> 8) & 0b111;
+        let offset = (instruction & 0xFF) << 2;
+
+        let address = self.registers[13].wrapping_add(offset as u32);
+        if instruction >> 11 == 0 {
+            bus.write_u32(address, self.registers[rd as usize] as u32);
+        } else {
+            self.registers[rd as usize] = bus.read_u32(address as u32) as u32;
+        }
+    }
+
+    //THUMB.12 get relative address
+    fn execute_get_relative_address(&mut self, instruction: u16) {
+        let dest = (instruction >> 8) & 0b111;
+        let offset = instruction & 0xFF << 2;
+
+        if (instruction >> 11) == 0 {
+            let pc_aligned = (self.registers[15].wrapping_add(2)) & !2;
+            self.registers[dest as usize] = pc_aligned.wrapping_add(offset as u32);
+        } else {
+            self.registers[dest as usize] = self.registers[13].wrapping_add(offset as u32);
+        }
+    }
+
     //THUMB.15 multiple load/store
     fn execute_multiple_ldr_str(&mut self, bus: &mut MemoryBus, instruction: u16) {
         let base = (instruction >> 8) & 0b111;
@@ -375,6 +403,7 @@ impl CPU {
                 self.registers[15] = self.registers[14].wrapping_add(nn << 1) & !1; //clear bit 0
                 self.registers[14] = temp;
                 self.cpsr &= !(1 << 5); //clear T flag — switch to ARM mode
+                println!("R12: {:#010x}", self.registers[12]);
             }
             _ => todo!(),
         }
