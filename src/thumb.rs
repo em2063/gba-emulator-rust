@@ -23,6 +23,7 @@ impl CPU {
                 match bits_15_12 {
                     0b1101 => self.execute_conditional_branch(instruction),
                     0b1100 => self.execute_multiple_ldr_str(bus, instruction),
+                    0b1000 => self.execute_ldr_str_halfword(bus, instruction),
                     _ => {
                         let bits_15_11 = (instruction >> 11) & 0b11111;
                         match bits_15_11 {
@@ -288,6 +289,22 @@ impl CPU {
                 self.set_flags(n, z, c, v);
             }
             _ => todo!(),
+        }
+    }
+
+    //THUMB.10 load/store halfword
+    fn execute_ldr_str_halfword(&mut self, bus: &mut MemoryBus, instruction: u16) {
+        let offset = (instruction >> 6) & 0b11111;
+        let base = (instruction >> 3) & 0b111;
+        let rb = self.registers[base as usize];
+
+        let source_dest = instruction & 0b111;
+
+        let address = rb.wrapping_add((offset as u32) << 1);
+        if (instruction >> 11) == 0 {
+            self.registers[source_dest as usize] = bus.read_u16(address as u32) as u32;
+        } else {
+            bus.write_u16(address, self.registers[source_dest as usize] as u32);
         }
     }
 

@@ -84,4 +84,9 @@ impl MemoryBus {
         let b1 = self.read_u8(addr.wrapping_add(1)) as u16;
         b0 | (b1 << 8)
     }
+
+    pub fn write_u16(&mut self, addr: u32, value: u32) {
+        self.write_u8(addr, (value & 0xFF) as u8);
+        self.write_u8(addr.wrapping_add(1), ((value >> 8) & 0xFF) as u8);
+    }
 }
