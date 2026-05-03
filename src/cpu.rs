@@ -96,19 +96,19 @@ impl CPU {
         let write_back = (instruction >> 21) & 1;
         let load = (instruction >> 20) & 1;
 
-        // ARM always stores the lowest-numbered register at the lowest address.
-        // Compute the lowest address we'll use, then walk upward through the list.
+        //ARM always stores the lowest-numbered register at the lowest address.
+        //compute the lowest address, then walk upward through the list.
         let count = (0..16).filter(|i| (rlist >> i) & 1 == 1).count() as u32;
         let mut address = if u == 1 {
-            if p == 1 { rn.wrapping_add(4) } else { rn } // IB / IA
+            if p == 1 { rn.wrapping_add(4) } else { rn } //IB / IA
         } else {
             if p == 1 {
                 rn.wrapping_sub(count * 4)
             }
-            // DB (STMDB / LDMDB)
+            //DB (STMDB / LDMDB)
             else {
                 rn.wrapping_sub(count * 4).wrapping_add(4)
-            } // DA
+            } //DA
         };
 
         for i in 0..16usize {

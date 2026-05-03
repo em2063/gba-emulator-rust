@@ -1,5 +1,3 @@
-use std::result;
-
 use crate::cpu::CPU;
 use crate::memory_bus::MemoryBus;
 
@@ -403,7 +401,6 @@ impl CPU {
                 self.registers[15] = self.registers[14].wrapping_add(nn << 1) & !1; //clear bit 0
                 self.registers[14] = temp;
                 self.cpsr &= !(1 << 5); //clear T flag — switch to ARM mode
-                println!("R12: {:#010x}", self.registers[12]);
             }
             _ => todo!(),
         }
