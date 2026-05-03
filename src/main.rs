@@ -62,7 +62,14 @@ fn main() {
         }
 
         // render and display
-        ppu.render_mode3(&bus.vram);
+        let dispcnt = bus.read_u16(0x4000000);
+        let mode = dispcnt & 0b111;
+        match mode {
+            3 => ppu.render_mode3(&bus.vram),
+            4 => ppu.render_mode4(&bus.vram, &bus.pallete),
+            _ => todo!(),
+        }
+
         texture.update(None, &ppu.framebuffer, 240 * 3).unwrap();
         canvas.copy(&texture, None, None).unwrap();
         canvas.present();

@@ -6,7 +6,7 @@ pub struct MemoryBus {
     ewram: [u8; 256 * 1024],   //on-board work RAM
     iwram: [u8; 32 * 1024],    //on-chip work RAM
     io: [u8; 0x400],           //input/output - 0 for now
-    pallete: [u8; 1024],       //pallete
+    pub pallete: [u8; 1024],   //pallete
     pub vram: [u8; 96 * 1024], //virtual ram
     oam: [u8; 1024],           //object ram
     sram: [u8; 64 * 1024],
