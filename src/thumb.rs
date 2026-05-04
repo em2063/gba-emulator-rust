@@ -1,3 +1,5 @@
+use sdl2::libc::regmatch_t;
+
 use crate::cpu::CPU;
 use crate::memory_bus::MemoryBus;
 
@@ -39,6 +41,7 @@ impl CPU {
                                 let bits_15_10 = (instruction >> 10) & 0b111111;
                                 match bits_15_10 {
                                     0b010000 => self.decode_thumb_alu(instruction),
+                                    0b010001 => self.execute_hi_register_ops(instruction),
                                     _ => {
                                         let bits_15_8 = (instruction >> 8) & 0xFF;
                                         match bits_15_8 {
@@ -309,6 +312,36 @@ impl CPU {
         }
     }
 
+    //THUMB.5 HI registers operations/BX
+    fn execute_hi_register_ops(&mut self, instruction: u16) {
+        let opcode = (instruction >> 8) & 0b11;
+        let msbs = (instruction >> 6) & 1;
+        let msbd = (instruction >> 7) & 1;
+        let rs = ((instruction >> 3) & 0b111) + (msbs * 8);
+        let rd = (instruction & 0b111) + (msbd * 8);
+
+        let source_reg = self.registers[rs as usize];
+        let dest_reg = self.registers[rd as usize];
+
+        match opcode {
+            0 => self.registers[rd as usize] = dest_reg.wrapping_add(source_reg),
+            1 => {
+                let (n, z, c, v) = self.sub_flags(dest_reg, source_reg);
+                self.set_flags(n, z, c, v);
+            }
+            2 => self.registers[rd as usize] = source_reg,
+            3 => {
+                if source_reg & 1 == 1 {
+                    self.cpsr |= 1 << 5;
+                } else {
+                    self.cpsr &= !(1 << 5);
+                }
+                self.registers[15] = source_reg & !3;
+            }
+            _ => {}
+        }
+    }
+
     //THUMB.6 load PC-relative (for loading immediates from literal pool)
     fn execute_load_pc_relative(&mut self, bus: &mut MemoryBus, instruction: u16) {
         let rd = (instruction >> 8) & 0b111;
@@ -521,7 +554,7 @@ impl CPU {
             }
             0b11111 => {
                 let nn = (instruction & 0x7FF) as u32;
-                let temp = self.registers[15].wrapping_add(2) | 1;
+                let temp = self.registers[15] | 1;
                 self.registers[15] = self.registers[14].wrapping_add(nn << 1);
                 self.registers[14] = temp;
             }
