@@ -16,6 +16,7 @@ impl CPU {
                 }
             }
             0b001 => self.execute_mov_cmp_add_sub(instruction),
+            0b011 => self.execute_ldr_str_with_immediate_offset(bus, instruction),
             _ => {
                 let bits_15_12 = (instruction >> 12) & 0xF;
                 match bits_15_12 {
@@ -24,6 +25,8 @@ impl CPU {
                     0b1000 => self.execute_ldr_str_halfword(bus, instruction),
                     0b1010 => self.execute_get_relative_address(instruction),
                     0b1001 => self.execute_ldr_str_sp_relative(bus, instruction),
+                    0b0101 => self.execute_ldr_str_with_register_offset(bus, instruction),
+                    0b1011 => self.execute_push_pop_registers(bus, instruction),
                     _ => {
                         let bits_15_11 = (instruction >> 11) & 0b11111;
                         match bits_15_11 {
@@ -31,11 +34,25 @@ impl CPU {
                                 self.excecute_bl_with_long_offset(instruction)
                             }
                             0b11100 => self.execute_unconditional_branch(instruction),
+                            0b1001 => self.execute_load_pc_relative(bus, instruction),
                             _ => {
                                 let bits_15_10 = (instruction >> 10) & 0b111111;
                                 match bits_15_10 {
                                     0b010000 => self.decode_thumb_alu(instruction),
-                                    _ => todo!(),
+                                    _ => {
+                                        let bits_15_8 = (instruction >> 8) & 0xFF;
+                                        match bits_15_8 {
+                                            0b10110000 => {
+                                                self.execute_offset_stack_pointer(instruction)
+                                            }
+                                            _ => {
+                                                println!(
+                                                    "unimplemented instruction: {:#034b} at PC: {:#010x}",
+                                                    instruction, self.registers[15]
+                                                );
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -292,6 +309,74 @@ impl CPU {
         }
     }
 
+    //THUMB.6 load PC-relative (for loading immediates from literal pool)
+    fn execute_load_pc_relative(&mut self, bus: &mut MemoryBus, instruction: u16) {
+        let rd = (instruction >> 8) & 0b111;
+        let nn = (instruction & 0xFF) as u32 * 4;
+        let address = (self.registers[15] & !2).wrapping_add(nn);
+
+        self.registers[rd as usize] = bus.read_u32(address);
+    }
+
+    //THUMB.7 load/store with register offset
+    fn execute_ldr_str_with_register_offset(&mut self, bus: &mut MemoryBus, instruction: u16) {
+        let ro = (instruction >> 6) & 0b111;
+        let rb = (instruction >> 3) & 0b111;
+        let rd = instruction & 0b111;
+        let opcode = (instruction >> 10) & 0b11;
+
+        let rb_register = self.registers[rb as usize];
+        let rd_register = self.registers[rd as usize];
+        let ro_register = self.registers[ro as usize];
+        let address = rb_register.wrapping_add(ro_register);
+        match opcode {
+            0 => {
+                bus.write_u32(address, rd_register);
+            }
+            1 => {
+                bus.write_u8(address, rd_register as u8);
+            }
+            2 => {
+                self.registers[rd as usize] = bus.read_u32(address);
+            }
+            3 => {
+                self.registers[rd as usize] = bus.read_u8(address) as u32;
+            }
+            _ => {}
+        }
+    }
+
+    //THUMB.9 load/store with immediate offset
+    fn execute_ldr_str_with_immediate_offset(&mut self, bus: &mut MemoryBus, instruction: u16) {
+        let rb = (instruction >> 3) & 0b111;
+        let rd = instruction & 0b111;
+        let nn = (instruction >> 6) & 0b11111;
+
+        let rb_register = self.registers[rb as usize];
+        let rd_register = self.registers[rd as usize];
+
+        let opcode = (instruction >> 11) & 0b11;
+        let is_byte = opcode >= 2;
+        let scaled_nn = if is_byte { nn as u32 } else { nn as u32 * 4 };
+
+        let address = rb_register.wrapping_add(scaled_nn as u32);
+        match opcode {
+            0 => {
+                bus.write_u32(address, rd_register);
+            }
+            1 => {
+                self.registers[rd as usize] = bus.read_u32(address);
+            }
+            2 => {
+                bus.write_u8(address, rd_register as u8);
+            }
+            3 => {
+                self.registers[rd as usize] = bus.read_u8(address) as u32;
+            }
+            _ => {}
+        }
+    }
+
     //THUMB.10 load/store halfword
     fn execute_ldr_str_halfword(&mut self, bus: &mut MemoryBus, instruction: u16) {
         let offset = (instruction >> 6) & 0b11111;
@@ -301,7 +386,7 @@ impl CPU {
         let source_dest = instruction & 0b111;
 
         let address = rb.wrapping_add((offset as u32) << 1);
-        if (instruction >> 11) == 0 {
+        if (instruction >> 11) == 1 {
             self.registers[source_dest as usize] = bus.read_u16(address as u32) as u32;
         } else {
             bus.write_u16(address, self.registers[source_dest as usize] as u32);
@@ -324,13 +409,58 @@ impl CPU {
     //THUMB.12 get relative address
     fn execute_get_relative_address(&mut self, instruction: u16) {
         let dest = (instruction >> 8) & 0b111;
-        let offset = instruction & 0xFF << 2;
+        let offset = (instruction & 0xFF) << 2;
 
         if (instruction >> 11) == 0 {
             let pc_aligned = (self.registers[15].wrapping_add(2)) & !2;
             self.registers[dest as usize] = pc_aligned.wrapping_add(offset as u32);
         } else {
             self.registers[dest as usize] = self.registers[13].wrapping_add(offset as u32);
+        }
+    }
+
+    //THUMB.13 add offset to stack pointer
+    fn execute_offset_stack_pointer(&mut self, instruction: u16) {
+        let nn = (instruction & 0b1111111) * 4;
+        let opcode = (instruction >> 7) & 1;
+
+        match opcode {
+            0 => self.registers[13] = self.registers[13].wrapping_add(nn as u32),
+            1 => self.registers[13] = self.registers[13].wrapping_sub(nn as u32),
+            _ => {}
+        }
+    }
+
+    //THUMB.14 push/pop registers
+    fn execute_push_pop_registers(&mut self, bus: &mut MemoryBus, instruction: u16) {
+        let rlist = instruction & 0xFF;
+        let pc_lr_bit = (instruction >> 8) & 1;
+        let opcode = (instruction >> 11) & 1;
+
+        if opcode == 0 {
+            //push
+            if pc_lr_bit == 1 {
+                self.registers[13] = self.registers[13].wrapping_sub(4);
+                bus.write_u32(self.registers[13], self.registers[14]);
+            }
+            for i in (0..8usize).rev() {
+                if (rlist >> i) & 1 == 1 {
+                    self.registers[13] = self.registers[13].wrapping_sub(4);
+                    bus.write_u32(self.registers[13], self.registers[i]);
+                }
+            }
+        } else {
+            //pop
+            for i in 0..8usize {
+                if (rlist >> i) & 1 == 1 {
+                    self.registers[i] = bus.read_u32(self.registers[13]);
+                    self.registers[13] = self.registers[13].wrapping_add(4);
+                }
+            }
+            if pc_lr_bit == 1 {
+                self.registers[15] = bus.read_u32(self.registers[13]);
+                self.registers[13] = self.registers[13].wrapping_add(4);
+            }
         }
     }
 

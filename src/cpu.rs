@@ -79,7 +79,6 @@ impl CPU {
                             "unimplemented instruction: {:#034b} at PC: {:#010x}",
                             instruction, self.registers[15]
                         );
-                        todo!()
                     }
                 }
             }

@@ -61,13 +61,21 @@ fn main() {
             }
         }
 
+        let dispcnt = bus.read_u16(0x04000000);
+        let bg0cnt = bus.read_u16(0x04000008);
+        println!("DISPCNT: {:#018b}", dispcnt);
+        println!("BG0CNT: {:#018b}", bg0cnt);
+        println!("Mode: {}", dispcnt & 0b111);
+        println!("BG0 enabled: {}", (dispcnt >> 8) & 1);
+
         // render and display
         let dispcnt = bus.read_u16(0x4000000);
         let mode = dispcnt & 0b111;
         match mode {
+            0 => ppu.render_mode0(&bus.vram, &bus.io, &bus.pallete),
             3 => ppu.render_mode3(&bus.vram),
             4 => ppu.render_mode4(&bus.vram, &bus.pallete),
-            _ => todo!(),
+            _ => {}
         }
 
         texture.update(None, &ppu.framebuffer, 240 * 3).unwrap();

@@ -5,7 +5,7 @@ pub struct MemoryBus {
     bios: [u8; 16 * 1024],     //system rom
     ewram: [u8; 256 * 1024],   //on-board work RAM
     iwram: [u8; 32 * 1024],    //on-chip work RAM
-    io: [u8; 0x400],           //input/output - 0 for now
+    pub io: [u8; 0x400],       //input/output - 0 for now
     pub pallete: [u8; 1024],   //pallete
     pub vram: [u8; 96 * 1024], //virtual ram
     oam: [u8; 1024],           //object ram
@@ -37,7 +37,8 @@ impl MemoryBus {
             0x04000000..=0x040003FE => {
                 if addr == 0x04000004 {
                     self.vblank_toggle = !self.vblank_toggle;
-                    return if self.vblank_toggle { 1 } else { 0 };
+                    let val = if self.vblank_toggle { 1 } else { 0 };
+                    return val;
                 }
                 self.io[(addr - 0x04000000) as usize]
             }
