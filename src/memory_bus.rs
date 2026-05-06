@@ -1,5 +1,3 @@
-use std::string::FromUtf16Error;
-
 pub struct MemoryBus {
     rom: Vec<u8>,
     bios: [u8; 16 * 1024],     //system rom

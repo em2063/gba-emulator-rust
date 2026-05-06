@@ -7,7 +7,10 @@ use crate::memory_bus::MemoryBus;
 impl CPU {
     //execute 16-bit thumb instructions
     pub fn execute_thumb_instruction(&mut self, bus: &mut MemoryBus, instruction: u16) {
-        println!("THUMB dispatch: {:#018b}", instruction);
+        println!(
+            "THUMB dispatch: {:#018b} at PC: {:#010x}",
+            instruction, self.registers[15]
+        );
         let bits_13_15 = (instruction >> 13) & 0b111;
         match bits_13_15 {
             0b000 => {
@@ -346,7 +349,7 @@ impl CPU {
     fn execute_load_pc_relative(&mut self, bus: &mut MemoryBus, instruction: u16) {
         let rd = (instruction >> 8) & 0b111;
         let nn = (instruction & 0xFF) as u32 * 4;
-        let address = (self.registers[15] & !2).wrapping_add(nn);
+        let address = (self.registers[15].wrapping_add(2) & !2).wrapping_add(nn);
 
         self.registers[rd as usize] = bus.read_u32(address);
     }

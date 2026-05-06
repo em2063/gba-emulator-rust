@@ -9,7 +9,7 @@ use sdl2::keyboard::Keycode;
 use sdl2::pixels::PixelFormatEnum;
 
 fn main() {
-    let rom: Vec<u8> = std::fs::read("hello.gba").unwrap();
+    let rom: Vec<u8> = std::fs::read("stripes.gba").unwrap();
     let mut bus = memory_bus::MemoryBus::new(rom);
     let mut cpu = cpu::CPU::new();
     let mut ppu = ppu::PPU::new();
@@ -45,7 +45,8 @@ fn main() {
             }
         }
 
-        for _ in 0..280896 {
+        for cycle in 0..280896u32 {
+            bus.io[6] = ((cycle / 1232) & 0xFF) as u8; // VCOUNT
             let pc = cpu.registers[15];
             let t_flag = (cpu.cpsr >> 5) & 1;
             if t_flag == 1 {

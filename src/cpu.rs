@@ -63,10 +63,17 @@ impl CPU {
                     0b000 | 0b001 => {
                         if (instruction >> 8) & 0xFFFFF == 0b00010010111111111111 {
                             self.decode_branch_exchange(instruction);
+                        } else if (instruction >> 4) & 1 == 1
+                            && (instruction >> 7) & 1 == 1
+                            && (instruction >> 5) & 0b11 != 0
+                        {
+                            self.execute_halfword_transfer(bus, instruction);
                         } else {
                             if (instruction >> 23) & 0b11 == 0b10 && (instruction >> 20) & 1 == 0b0
                             {
                                 self.execute_psr(instruction);
+                            } else if (instruction >> 4) & 0xF == 0b1001 {
+                                self.execute_mul_and_mul_acc_fullwords(instruction);
                             } else {
                                 self.decode_alu(instruction);
                             }
@@ -130,6 +137,73 @@ impl CPU {
         }
     }
 
+    fn execute_halfword_transfer(&mut self, bus: &mut MemoryBus, instruction: u32) {
+        let p = (instruction >> 24) & 1; //pre/post
+        let u = (instruction >> 23) & 1; //up/down
+        let i = (instruction >> 22) & 1; //imm offset flag (0 = reg offset, 1 = imm offset)
+        let w = (instruction >> 21) & 1; //write-back bit (0 = no, 1 = write add into base)
+        let l = (instruction >> 20) & 1; //ldr/str bit (0 = store to mem, 1 = load from mem)
+
+        let rn = (instruction >> 16) & 0xF; //base register
+        let rd = (instruction >> 12) & 0xF; //source/dest register
+
+        let offset = if i == 0 {
+            self.registers[(instruction & 0xF) as usize]
+        } else {
+            ((instruction >> 8) & 0xF) << 4 | (instruction & 0xF)
+        };
+
+        let address = if u == 1 {
+            if p == 1 {
+                self.registers[rn as usize].wrapping_add(offset)
+            } else {
+                self.registers[rn as usize]
+            }
+        } else {
+            if p == 1 {
+                self.registers[rn as usize].wrapping_sub(offset)
+            } else {
+                self.registers[rn as usize]
+            }
+        };
+
+        let opcode = (instruction >> 5) & 0b11;
+        if l == 0 {
+            match opcode {
+                1 => bus.write_u16(address, self.registers[rd as usize]),
+                2 => {
+                    self.registers[rd as usize] = bus.read_u32(address);
+                    self.registers[rd.wrapping_add(1) as usize] =
+                        bus.read_u32(address.wrapping_add(4));
+                }
+                3 => {
+                    bus.write_u32(address, self.registers[rd as usize]);
+                    bus.write_u32(
+                        address.wrapping_add(4),
+                        self.registers[rd.wrapping_add(1) as usize],
+                    );
+                }
+                _ => {}
+            }
+        } else {
+            match opcode {
+                1 => self.registers[rd as usize] = bus.read_u16(address) as u32,
+                2 => self.registers[rd as usize] = bus.read_u8(address) as i8 as i32 as u32, // sign extend
+                3 => self.registers[rd as usize] = bus.read_u16(address) as i16 as i32 as u32, // sign extend
+                _ => {}
+            }
+        }
+
+        if w == 1 || p == 0 {
+            let wb = if u == 1 {
+                self.registers[rn as usize].wrapping_add(offset)
+            } else {
+                self.registers[rn as usize].wrapping_sub(offset)
+            };
+            self.registers[rn as usize] = wb;
+        }
+    }
+
     fn execute_ldr_str(&mut self, bus: &mut MemoryBus, instruction: u32) {
         let is_register = (instruction >> 25) & 1;
         let offset;
@@ -174,7 +248,7 @@ impl CPU {
         let base_idx = ((instruction >> 16) & 0xF) as usize;
         let rd_idx = ((instruction >> 12) & 0xF) as usize;
 
-        let rn = self.registers[base_idx];
+        let rn = self.read_register(base_idx as u32);
 
         // Step 1: compute offset address (but DON'T apply post yet)
         let offset_addr = if u == 1 {
@@ -247,6 +321,47 @@ impl CPU {
                 );
                 todo!()
             }
+        }
+    }
+
+    fn execute_mul_and_mul_acc_fullwords(&mut self, instruction: u32) {
+        let rd = (instruction >> 16) & 0xF; //dest register
+        let rn = (instruction >> 12) & 0xF; //accumulate register
+        let rs = (instruction >> 8) & 0xF; //operand register
+        let rm = instruction & 0xF; //operand register 2?
+
+        let rm_reg = self.registers[rm as usize];
+        let rs_reg = self.registers[rs as usize];
+
+        let opcode = (instruction >> 21) & 0xF;
+        match opcode {
+            //mul
+            0b0000 => {
+                let result = rm_reg.wrapping_mul(rs_reg);
+                self.registers[rd as usize] = result;
+
+                if (instruction >> 20) & 1 == 1 {
+                    let c = (self.cpsr >> 29) & 1 == 1;
+                    let v = (self.cpsr >> 28) & 1 == 1;
+                    let n = (result >> 31) == 1;
+                    let z = result == 0;
+                    self.set_flags(n, z, c, v);
+                }
+            }
+            //mla
+            0b0001 => {
+                let result = rm_reg.wrapping_mul(rs_reg).wrapping_add(rn);
+                self.registers[rd as usize] = result;
+
+                if (instruction >> 20) & 1 == 1 {
+                    let c = (self.cpsr >> 29) & 1 == 1;
+                    let v = (self.cpsr >> 28) & 1 == 1;
+                    let n = (result >> 31) == 1;
+                    let z = result == 0;
+                    self.set_flags(n, z, c, v);
+                }
+            }
+            _ => todo!(),
         }
     }
 
