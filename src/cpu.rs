@@ -72,7 +72,9 @@ impl CPU {
                             if (instruction >> 23) & 0b11 == 0b10 && (instruction >> 20) & 1 == 0b0
                             {
                                 self.execute_psr(instruction);
-                            } else if (instruction >> 4) & 0xF == 0b1001 {
+                            } else if ((instruction >> 4) & 0xF == 0b1001)
+                                && (instruction >> 25) & 1 == 0
+                            {
                                 self.execute_mul_and_mul_acc_fullwords(instruction);
                             } else {
                                 self.decode_alu(instruction);
@@ -361,7 +363,29 @@ impl CPU {
                     self.set_flags(n, z, c, v);
                 }
             }
-            _ => todo!(),
+            //smlal
+            0b0111 => {
+                let rdlo = self.registers[rn as usize] as u64;
+                let rdhi = self.registers[rd as usize] as u64;
+                let existing = ((rdhi << 32) | rdlo) as i64;
+                let result = (rm_reg as i64)
+                    .wrapping_mul(rs_reg as i64)
+                    .wrapping_add(existing);
+                self.registers[rn as usize] = result as u32;
+                self.registers[rd as usize] = (result >> 32) as u32;
+
+                if (instruction >> 20) & 1 == 1 {
+                    let n = (result >> 63) as u32 == 1;
+                    let z = result == 0;
+                    let c = (self.cpsr >> 29) & 1 == 1;
+                    let v = (self.cpsr >> 28) & 1 == 1;
+                    self.set_flags(n, z, c, v);
+                }
+            }
+            _ => {
+                print!("Unimplemented instruction: {:#034b}\n", instruction);
+                todo!()
+            }
         }
     }
 
