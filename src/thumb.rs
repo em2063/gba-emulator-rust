@@ -7,10 +7,6 @@ use crate::memory_bus::MemoryBus;
 impl CPU {
     //execute 16-bit thumb instructions
     pub fn execute_thumb_instruction(&mut self, bus: &mut MemoryBus, instruction: u16) {
-        println!(
-            "THUMB dispatch: {:#018b} at PC: {:#010x}",
-            instruction, self.registers[15]
-        );
         let bits_13_15 = (instruction >> 13) & 0b111;
         match bits_13_15 {
             0b000 => {
@@ -25,7 +21,9 @@ impl CPU {
             _ => {
                 let bits_15_12 = (instruction >> 12) & 0xF;
                 match bits_15_12 {
-                    0b1101 => self.execute_conditional_branch(instruction),
+                    0b1101 => {
+                        self.execute_conditional_branch(instruction);
+                    }
                     0b1100 => self.execute_multiple_ldr_str(bus, instruction),
                     0b1000 => self.execute_ldr_str_halfword(bus, instruction),
                     0b1010 => self.execute_get_relative_address(instruction),
@@ -51,6 +49,7 @@ impl CPU {
                                             0b10110000 => {
                                                 self.execute_offset_stack_pointer(instruction)
                                             }
+                                            0b11011111 => self.execute_swi_thumb(bus),
                                             _ => {
                                                 println!(
                                                     "unimplemented instruction: {:#034b} at PC: {:#010x}",
@@ -284,7 +283,7 @@ impl CPU {
             }
             //MUL
             0xD => {
-                let result = rd_val * rs_val;
+                let result = rd_val.wrapping_mul(rs_val);
                 self.registers[rd as usize] = result;
 
                 let c = (self.cpsr >> 29) & 1 == 1;
@@ -332,14 +331,25 @@ impl CPU {
                 let (n, z, c, v) = self.sub_flags(dest_reg, source_reg);
                 self.set_flags(n, z, c, v);
             }
-            2 => self.registers[rd as usize] = source_reg,
+            2 => {
+                if rd == 15 {
+                    if source_reg & 1 == 1 {
+                        self.cpsr |= 1 << 5;
+                    } else {
+                        self.cpsr &= !(1 << 5);
+                    }
+                    self.registers[15] = source_reg & !1;
+                } else {
+                    self.registers[rd as usize] = source_reg;
+                }
+            }
             3 => {
                 if source_reg & 1 == 1 {
                     self.cpsr |= 1 << 5;
                 } else {
                     self.cpsr &= !(1 << 5);
                 }
-                self.registers[15] = source_reg & !3;
+                self.registers[15] = source_reg & !1;
             }
             _ => {}
         }
@@ -494,8 +504,14 @@ impl CPU {
                 }
             }
             if pc_lr_bit == 1 {
-                self.registers[15] = bus.read_u32(self.registers[13]);
+                let value = bus.read_u32(self.registers[13]);
                 self.registers[13] = self.registers[13].wrapping_add(4);
+                if value & 1 == 1 {
+                    self.cpsr |= 1 << 5;
+                } else {
+                    self.cpsr &= !(1 << 5);
+                }
+                self.registers[15] = value & !1;
             }
         }
     }
@@ -530,14 +546,14 @@ impl CPU {
         let opcode = ((instruction >> 8) & 0xF) as u32;
         if self.check_condition(opcode) {
             let offset = (instruction & 0xFF) as i8 as i32;
-            self.registers[15] = (self.registers[15] as i32 + (offset << 1)) as u32;
+            self.registers[15] = (self.registers[15] as i32 + 2 + (offset << 1)) as u32;
         }
     }
 
     //THUMB.18 unconditional branch (B)
     fn execute_unconditional_branch(&mut self, instruction: u16) {
         let offset = ((instruction & 0x7FF) as i16) << 5 >> 5;
-        self.registers[15] = (self.registers[15] as i32 + ((offset as i32) << 1)) as u32;
+        self.registers[15] = (self.registers[15] as i32 + 2 + ((offset as i32) << 1)) as u32;
     }
 
     //THUMB.19 long branch with link
@@ -570,5 +586,13 @@ impl CPU {
             }
             _ => todo!(),
         }
+    }
+    //swi
+    fn execute_swi_thumb(&mut self, bus: &mut MemoryBus) {
+        self.switch_mode(0b10011);
+        self.r14_svc = self.registers[15].wrapping_add(2);
+        self.spsr_svc = self.cpsr;
+        self.cpsr = (self.cpsr & !0x3F) | 0x13 | (1 << 7);
+        self.registers[15] = 0x00000008;
     }
 }

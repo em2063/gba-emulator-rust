@@ -1,6 +1,6 @@
 pub struct MemoryBus {
     rom: Vec<u8>,
-    bios: [u8; 16 * 1024],     //system rom
+    pub bios: [u8; 16 * 1024], //system rom
     ewram: [u8; 256 * 1024],   //on-board work RAM
     iwram: [u8; 32 * 1024],    //on-chip work RAM
     pub io: [u8; 0x400],       //input/output - 0 for now
@@ -8,7 +8,6 @@ pub struct MemoryBus {
     pub vram: [u8; 96 * 1024], //virtual ram
     oam: [u8; 1024],           //object ram
     sram: [u8; 64 * 1024],
-    vblank_toggle: bool,
 }
 
 impl MemoryBus {
@@ -23,7 +22,6 @@ impl MemoryBus {
             vram: [0; 96 * 1024],   //virtual ram
             oam: [0; 1024],         //object ram
             sram: [0; 64 * 1024],
-            vblank_toggle: false,
         }
     }
 
@@ -31,12 +29,13 @@ impl MemoryBus {
         match addr {
             0x00000000..=0x00003FFF => self.bios[addr as usize],
             0x02000000..=0x0203FFFF => self.ewram[(addr - 0x02000000) as usize],
-            0x03000000..=0x03007FFF => self.iwram[(addr - 0x03000000) as usize],
+            0x03000000..=0x03FFFFFF => self.iwram[((addr - 0x03000000) & 0x7FFF) as usize],
             0x04000000..=0x040003FE => {
                 if addr == 0x04000004 {
-                    self.vblank_toggle = !self.vblank_toggle;
-                    let val = if self.vblank_toggle { 1 } else { 0 };
-                    return val;
+                    // DISPSTAT low byte: bit 0 = VBlank (VCOUNT >= 160)
+                    let vcount = self.io[6] as u16;
+                    let vblank = if vcount >= 160 { 1u8 } else { 0u8 };
+                    return vblank;
                 }
                 self.io[(addr - 0x04000000) as usize]
             }
@@ -44,7 +43,14 @@ impl MemoryBus {
             0x06000000..=0x06017FFF => self.vram[(addr - 0x06000000) as usize],
             0x07000000..=0x070003FF => self.oam[(addr - 0x07000000) as usize],
             0x0E000000..=0x0E00FFFF => self.sram[(addr - 0x0E000000) as usize],
-            0x08000000..=0x09FFFFFF => self.rom[(addr - 0x08000000) as usize],
+            0x08000000..=0x09FFFFFF => {
+                let offset = (addr - 0x08000000) as usize;
+                if offset < self.rom.len() {
+                    self.rom[offset]
+                } else {
+                    0xFF
+                }
+            }
             _ => 0xFF,
         }
     }
@@ -68,7 +74,7 @@ impl MemoryBus {
         match addr {
             0x00000000..=0x00003FFF => self.bios[addr as usize] = value,
             0x02000000..=0x0203FFFF => self.ewram[(addr - 0x02000000) as usize] = value,
-            0x03000000..=0x03007FFF => self.iwram[(addr - 0x03000000) as usize] = value,
+            0x03000000..=0x03FFFFFF => self.iwram[((addr - 0x03000000) & 0x7FFF) as usize] = value,
             0x04000000..=0x040003FE => self.io[(addr - 0x04000000) as usize] = value,
             0x05000000..=0x050003FF => self.pallete[(addr - 0x05000000) as usize] = value,
             0x06000000..=0x06017FFF => self.vram[(addr - 0x06000000) as usize] = value,
@@ -85,6 +91,9 @@ impl MemoryBus {
     }
 
     pub fn write_u16(&mut self, addr: u32, value: u32) {
+        if addr == 0x04000000 {
+            println!("DISPCNT write from  value={:#06x}", value);
+        }
         self.write_u8(addr, (value & 0xFF) as u8);
         self.write_u8(addr.wrapping_add(1), ((value >> 8) & 0xFF) as u8);
     }

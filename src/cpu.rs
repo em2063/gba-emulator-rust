@@ -1,11 +1,38 @@
 use crate::memory_bus::MemoryBus;
 
 //struct to hold 16 registers: 0-12 general purpose, 13 stack pointer,
-// 14 link register, 15 program counter
-// CPSR flags stored as a single 32-bit
+//14 link register, 15 program counter
+//CPSR flags stored as a single 32-bit
+//SPSR flags stored as 32-bit
+//banked registers for each mode (required for exceptions)
 pub struct CPU {
     pub registers: [u32; 16],
     pub cpsr: u32,
+    pub spsr: u32,
+
+    //banked R13/R14 for each mode
+    pub r13_svc: u32,
+    pub r14_svc: u32,
+    pub spsr_svc: u32,
+    pub r13_irq: u32,
+    pub r14_irq: u32,
+    pub spsr_irq: u32,
+    pub r13_abt: u32,
+    pub r14_abt: u32,
+    pub spsr_abt: u32,
+    pub r13_und: u32,
+    pub r14_und: u32,
+    pub spsr_und: u32,
+    pub r13_fiq: u32,
+    pub r14_fiq: u32,
+    pub spsr_fiq: u32,
+
+    // FIQ also banks R8-R12
+    pub r8_fiq: u32,
+    pub r9_fiq: u32,
+    pub r10_fiq: u32,
+    pub r11_fiq: u32,
+    pub r12_fiq: u32,
 }
 
 impl CPU {
@@ -14,6 +41,31 @@ impl CPU {
         CPU {
             registers: [0; 16],
             cpsr: 0,
+            spsr: 0,
+
+            //banked R13/R14 for each mode
+            r13_svc: 0,
+            r14_svc: 0,
+            spsr_svc: 0,
+            r13_irq: 0,
+            r14_irq: 0,
+            spsr_irq: 0,
+            r13_abt: 0,
+            r14_abt: 0,
+            spsr_abt: 0,
+            r13_und: 0,
+            r14_und: 0,
+            spsr_und: 0,
+            r13_fiq: 0,
+            r14_fiq: 0,
+            spsr_fiq: 0,
+
+            // FIQ also banks R8-R12
+            r8_fiq: 0,
+            r9_fiq: 0,
+            r10_fiq: 0,
+            r11_fiq: 0,
+            r12_fiq: 0,
         }
     }
 
@@ -39,6 +91,7 @@ impl CPU {
             0b1100 => !z && (n == v),
             0b1101 => z || (n != v),
             0b1110 => true,
+            0b1111 => false,
             _ => todo!(),
         }
     }
@@ -55,7 +108,9 @@ impl CPU {
 
         let bits_27_24 = (instruction >> 24) & 0xF;
         match bits_27_24 {
-            0b1111 => self.execute_swi(instruction),
+            0b1111 => {
+                self.execute_swi(bus, instruction);
+            }
             _ => {
                 let bits_27_25 = (instruction >> 25) & 0b111;
                 match bits_27_25 {
@@ -269,7 +324,6 @@ impl CPU {
         // Step 3: perform memory access
         if l == 1 {
             // LDR
-            println!("LDR address: {:#010x}", address);
             if b == 1 {
                 self.registers[rd_idx] = bus.read_u8(address) as u32;
             } else {
@@ -390,7 +444,6 @@ impl CPU {
     }
 
     fn execute_psr(&mut self, instruction: u32) {
-        println!("PSR instruction: {:#010x}", instruction);
         let i = (instruction >> 25) & 1; //immediate op flag
         let source_dest = (instruction >> 22) & 1; //Source/Destination PSR  (0=CPSR, 1=SPSR_<current mode>)
         let opcode = (instruction >> 21) & 1; //opcode: 1 = MSR: ;Psr[field] = Op, 0 = MRS: ;Rd = Psr
@@ -404,14 +457,16 @@ impl CPU {
                 self.registers[(instruction & 0xF) as usize]
             };
 
+            let psr = if source_dest == 0 {
+                &mut self.cpsr
+            } else {
+                &mut self.spsr
+            };
             if (instruction >> 19) & 1 == 1 {
-                //flags
-                self.cpsr = (self.cpsr & 0x00FFFFFF) | (value & 0xFF000000);
+                *psr = (*psr & 0x00FFFFFF) | (value & 0xFF000000);
             }
-
             if (instruction >> 16) & 1 == 1 {
-                //control flag
-                self.cpsr = (self.cpsr & 0xFFFFFF00) | (value & 0x000000FF);
+                *psr = (*psr & 0xFFFFFF00) | (value & 0x000000FF);
             }
         } else {
             //MRS - read from psr to register
@@ -419,8 +474,8 @@ impl CPU {
             self.registers[rd as usize] = if source_dest == 0 {
                 self.cpsr
             } else {
-                self.cpsr
-            }
+                self.spsr
+            };
         }
     }
 
@@ -443,7 +498,6 @@ impl CPU {
         match opcode {
             0b0001 => {
                 let target = self.registers[rn as usize];
-                print!("Target: {}\n", target);
                 let thumb = target & 1;
                 if thumb == 1 {
                     self.cpsr |= 1 << 5;
@@ -460,19 +514,83 @@ impl CPU {
         }
     }
 
-    fn execute_swi(&mut self, instruction: u32) {
-        let swi_number = (instruction >> 16) & 0xFF;
-        match swi_number {
-            0x06 => {
-                //div
-                let num = self.registers[0];
-                let denom = self.registers[1];
-                self.registers[0] = num / denom;
-                self.registers[1] = num % denom;
-                self.registers[2] = ((num / denom) as i32).abs() as u32;
+    //switches between banked registers and system registers, used for exceptions and SWI
+    pub fn switch_mode(&mut self, new_mode: u32) {
+        match self.cpsr & 0x1F {
+            //supervisor
+            0b10011 => {
+                self.r13_svc = self.registers[13];
+                self.r14_svc = self.registers[14];
             }
-            _ => todo!("SWI {:#04x}", swi_number),
+            //irq
+            0b10010 => {
+                self.r13_irq = self.registers[13];
+                self.r14_irq = self.registers[14];
+            }
+            //abort
+            0b10111 => {
+                self.r13_abt = self.registers[13];
+                self.r14_abt = self.registers[14];
+            }
+            //fiq
+            0b10001 => {
+                self.r13_fiq = self.registers[13];
+                self.r14_fiq = self.registers[14];
+
+                self.r8_fiq = self.registers[8];
+                self.r9_fiq = self.registers[9];
+                self.r10_fiq = self.registers[10];
+                self.r11_fiq = self.registers[11];
+                self.r12_fiq = self.registers[12];
+            }
+            //undefined
+            0b11011 => {
+                self.r13_und = self.registers[13];
+                self.r14_und = self.registers[14];
+            }
+            _ => {}
         }
+
+        match new_mode {
+            //supervisor
+            0b10011 => {
+                self.registers[13] = self.r13_svc;
+                self.registers[14] = self.r14_svc;
+            }
+            0b10010 => {
+                self.registers[13] = self.r13_irq;
+                self.registers[14] = self.r14_irq;
+            }
+            0b10111 => {
+                self.registers[13] = self.r13_abt;
+                self.registers[14] = self.r14_abt;
+            }
+            0b10001 => {
+                self.registers[13] = self.r13_fiq;
+                self.registers[14] = self.r14_fiq;
+                self.registers[8] = self.r8_fiq;
+                self.registers[9] = self.r9_fiq;
+                self.registers[10] = self.r10_fiq;
+                self.registers[11] = self.r11_fiq;
+                self.registers[12] = self.r12_fiq;
+            }
+            0b11011 => {
+                self.registers[13] = self.r13_und;
+                self.registers[14] = self.r14_und;
+            }
+            _ => {}
+        }
+
+        //update CPSR mode bits
+        self.cpsr = (self.cpsr & !0x1F) | new_mode;
+    }
+
+    pub fn execute_swi(&mut self, bus: &mut MemoryBus, instruction: u32) {
+        self.switch_mode(0b10011); //save current regs, load svc regs
+        self.r14_svc = self.registers[15].wrapping_add(4); //now set return address
+        self.spsr_svc = self.cpsr; //save current flags
+        self.cpsr = (self.cpsr & !0x3F) | 0x13 | (1 << 7); //switch mode in CPSR
+        self.registers[15] = 0x00000008; //jump to vector
     }
 
     pub fn apply_shift(
@@ -540,7 +658,9 @@ impl CPU {
 
     //decodes operand between loading as an immediate value or deducing from a register
     fn decode_op2(&mut self, instruction: u32) -> (u32, bool) {
-        println!("decode_op2: {:#010x}", instruction);
+        if instruction == 0x00000000 {
+            println!("zero instruction at PC: {:#010x}", self.registers[15]);
+        }
         let op_flag = (instruction >> 25) & 1;
         let carry_in = (self.cpsr >> 29) & 1 == 1;
 
@@ -641,14 +761,30 @@ impl CPU {
         (n, z, c, v)
     }
 
+    fn get_spsr(&self) -> u32 {
+        match self.cpsr & 0x1F {
+            0b10011 => self.spsr_svc,
+            0b10010 => self.spsr_irq,
+            0b10001 => self.spsr_fiq,
+            0b10111 => self.spsr_abt,
+            0b11011 => self.spsr_und,
+            _ => self.cpsr,
+        }
+    }
+
     //MOV rd, op2
     fn execute_mov(&mut self, instruction: u32) {
-        let dest_register = (instruction >> 12) & 0xF;
+        let dest = (instruction >> 12) & 0xF;
         let (op2, carry) = self.decode_op2(instruction);
         //execute mov instruction
-        self.registers[dest_register as usize] = op2;
+        self.registers[dest as usize] = op2;
 
-        if (instruction >> 20) & 1 == 1 {
+        if dest == 15 && (instruction >> 20) & 1 == 1 {
+            // MOVS PC — restore CPSR from SPSR and switch mode
+            let spsr = self.get_spsr();
+            self.switch_mode(spsr & 0x1F);
+            self.cpsr = spsr;
+        } else if (instruction >> 20) & 1 == 1 {
             let (n, z, c, v) = self.logical_flags(op2, carry);
             self.set_flags(n, z, c, v);
         }
