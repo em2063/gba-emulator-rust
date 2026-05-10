@@ -16,13 +16,8 @@ fn main() {
     let mut cpu = cpu::CPU::new();
     let mut ppu = ppu::PPU::new();
 
-    // post-BIOS state — values the real BIOS would have set up
-    cpu.registers[13] = 0x03007F00; // SP_usr/sys
-    cpu.registers[14] = 0x08000000; // LR sentinel
-    cpu.registers[15] = 0x08000000; // ROM entry point
-    cpu.cpsr = 0x6000001F;          // System mode, Z+C, ARM
-    cpu.r13_irq = 0x03007FA0;       // IRQ stack (BIOS default)
-    cpu.r13_svc = 0x03007FE0;       // SVC stack (BIOS default)
+    cpu.registers[15] = 0x00000000;
+    cpu.cpsr = 0x600000D3; //supervisor mode
 
     //SDL2 setup
     let sdl_context = sdl2::init().unwrap();
@@ -44,6 +39,7 @@ fn main() {
     let mut frame = 0u32;
     let mut in_rom = false;
     let mut last_dispcnt = 0u16;
+
     'running: loop {
         //handle events
         for event in event_pump.poll_iter() {
@@ -57,26 +53,51 @@ fn main() {
             }
         }
 
+        let mut vblank_irq_fired = false;
         for _cycle in 0..280896u32 {
-            bus.io[6] = (_cycle / 1232) as u8; // VCOUNT
+            let vcount = (_cycle / 1232) % 228;
+            bus.io[6] = vcount as u8; //VCOUNT low byte
+            bus.io[7] = (vcount >> 8) as u8; //VCOUNT high byte
+
+            //update DISPSTAT vblank flag
+            if vcount >= 160 {
+                bus.io[4] |= 1; //set vblank bit
+            } else {
+                bus.io[4] &= !1; //clear vblank bit
+            }
+
+            if vcount == 160 && !vblank_irq_fired {
+                vblank_irq_fired = true;
+                let ie = bus.read_u16(0x04000200);
+                let ime = bus.read_u16(0x04000208);
+                let cpsr_irq_disabled = (cpu.cpsr >> 7) & 1 == 1; // bit 7 = I flag
+                if !cpsr_irq_disabled && ime & 1 == 1 && ie & 1 == 1 {
+                    // only fire if IRQs are enabled
+                    let if_val = bus.read_u16(0x04000202) as u32;
+                    bus.write_u16(0x04000202, if_val | 1);
+                    cpu.trigger_irq(&mut bus);
+                }
+            }
+            if vcount == 0 {
+                vblank_irq_fired = false;
+            }
+
             let pc = cpu.registers[15];
+            if pc == 0xFFFFFFFE || pc == 0xFFFFFFFF {
+                println!("Bad PC! Last instruction area: {:#010x}", cpu.registers[14]);
+                // print nearby memory
+                for i in 0..4 {
+                    println!(
+                        "  [{:#010x}] = {:#010x}",
+                        cpu.registers[14].wrapping_sub(8).wrapping_add(i * 4),
+                        bus.read_u32(cpu.registers[14].wrapping_sub(8).wrapping_add(1 * 4) & !1)
+                    );
+                }
+            }
 
             if !in_rom && pc >= 0x08000000 {
                 println!("[frame {frame}] BIOS done — entered ROM at {pc:#010x}");
                 in_rom = true;
-            }
-
-            // Null function pointer guard: BX to address 0 means an unset callback.
-            // Return via LR instead of running the BIOS reset handler.
-            if pc == 0 {
-                let lr = cpu.registers[14];
-                if lr & 1 == 1 {
-                    cpu.cpsr |= 1 << 5;
-                } else {
-                    cpu.cpsr &= !(1 << 5);
-                }
-                cpu.registers[15] = lr & !1;
-                continue;
             }
 
             let t_flag = (cpu.cpsr >> 5) & 1;
@@ -96,16 +117,16 @@ fn main() {
             println!(
                 "[frame {frame}] DISPCNT {:#06x}: mode={} forced_blank={} obj={} win0={} win1={} obj_win={} | bg0={} bg1={} bg2={} bg3={}",
                 dispcnt,
-                dispcnt & 0b111,          // bits 2:0 — display mode
-                (dispcnt >> 7) & 1,       // bit 7  — forced blank (white screen)
-                (dispcnt >> 12) & 1,      // bit 12 — OBJ/sprite layer enabled
-                (dispcnt >> 13) & 1,      // bit 13 — window 0 enable
-                (dispcnt >> 14) & 1,      // bit 14 — window 1 enable
-                (dispcnt >> 15) & 1,      // bit 15 — OBJ window enable
-                (dispcnt >> 8) & 1,       // bit 8  — BG0
-                (dispcnt >> 9) & 1,       // bit 9  — BG1
-                (dispcnt >> 10) & 1,      // bit 10 — BG2
-                (dispcnt >> 11) & 1,      // bit 11 — BG3
+                dispcnt & 0b111,     // bits 2:0 — display mode
+                (dispcnt >> 7) & 1,  // bit 7  — forced blank (white screen)
+                (dispcnt >> 12) & 1, // bit 12 — OBJ/sprite layer enabled
+                (dispcnt >> 13) & 1, // bit 13 — window 0 enable
+                (dispcnt >> 14) & 1, // bit 14 — window 1 enable
+                (dispcnt >> 15) & 1, // bit 15 — OBJ window enable
+                (dispcnt >> 8) & 1,  // bit 8  — BG0
+                (dispcnt >> 9) & 1,  // bit 9  — BG1
+                (dispcnt >> 10) & 1, // bit 10 — BG2
+                (dispcnt >> 11) & 1, // bit 11 — BG3
             );
             last_dispcnt = dispcnt;
         }
@@ -119,7 +140,7 @@ fn main() {
 
         frame += 1;
 
-        // render and display
+        //render and display
         let dispcnt = bus.read_u16(0x4000000);
         let mode = dispcnt & 0b111;
         match mode {

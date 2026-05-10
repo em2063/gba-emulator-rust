@@ -28,7 +28,13 @@ impl CPU {
                     0b1000 => self.execute_ldr_str_halfword(bus, instruction),
                     0b1010 => self.execute_get_relative_address(instruction),
                     0b1001 => self.execute_ldr_str_sp_relative(bus, instruction),
-                    0b0101 => self.execute_ldr_str_with_register_offset(bus, instruction),
+                    0b0101 => {
+                        if ((instruction >> 9) & 1 == 0) {
+                            self.execute_ldr_str_with_register_offset(bus, instruction)
+                        } else {
+                            self.execute_ldr_str_sign_extended(bus, instruction);
+                        }
+                    }
                     0b1011 => self.execute_push_pop_registers(bus, instruction),
                     _ => {
                         let bits_15_11 = (instruction >> 11) & 0b11111;
@@ -387,6 +393,39 @@ impl CPU {
             }
             3 => {
                 self.registers[rd as usize] = bus.read_u8(address) as u32;
+            }
+            _ => {}
+        }
+    }
+
+    //THUMB.8 load/store sign-extended byte/halfword
+    fn execute_ldr_str_sign_extended(&mut self, bus: &mut MemoryBus, instruction: u16) {
+        let ro = (instruction >> 6) & 0b111;
+        let rb = (instruction >> 3) & 0b111;
+        let rd = instruction & 0b111;
+        let opcode = (instruction >> 10) & 0b11;
+
+        let rb_register = self.registers[rb as usize];
+        let rd_register = self.registers[rd as usize];
+        let ro_register = self.registers[ro as usize];
+        let address = rb_register.wrapping_add(ro_register);
+        match opcode {
+            0 => {
+                bus.write_u32(address, rd_register);
+            }
+            1 => {
+                let byte = bus.read_u8(address);
+                let sign_extended = (byte as i8) as i32 as u32;
+                self.registers[rd as usize] = sign_extended;
+            }
+            2 => {
+                let halfword = bus.read_u16(address);
+                self.registers[rd as usize] = halfword as u32;
+            }
+            3 => {
+                let halfword = bus.read_u16(address);
+                let sign_extended = (halfword as i16) as i32 as u32;
+                self.registers[rd as usize] = sign_extended;
             }
             _ => {}
         }

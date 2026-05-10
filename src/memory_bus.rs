@@ -32,7 +32,7 @@ impl MemoryBus {
             0x03000000..=0x03FFFFFF => self.iwram[((addr - 0x03000000) & 0x7FFF) as usize],
             0x04000000..=0x040003FE => {
                 if addr == 0x04000004 {
-                    // DISPSTAT low byte: bit 0 = VBlank (VCOUNT >= 160)
+                    //DISPSTAT low byte: bit 0 = VBlank (VCOUNT >= 160)
                     let vcount = self.io[6] as u16;
                     let vblank = if vcount >= 160 { 1u8 } else { 0u8 };
                     return vblank;

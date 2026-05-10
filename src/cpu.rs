@@ -516,6 +516,12 @@ impl CPU {
 
     //switches between banked registers and system registers, used for exceptions and SWI
     pub fn switch_mode(&mut self, new_mode: u32) {
+        if new_mode == 0b10010 {
+            println!(
+                "Switching to IRQ mode from PC={:#010x} CPSR={:#010x}",
+                self.registers[15], self.cpsr
+            );
+        }
         match self.cpsr & 0x1F {
             //supervisor
             0b10011 => {
@@ -591,6 +597,22 @@ impl CPU {
         self.spsr_svc = self.cpsr; //save current flags
         self.cpsr = (self.cpsr & !0x3F) | 0x13 | (1 << 7); //switch mode in CPSR
         self.registers[15] = 0x00000008; //jump to vector
+    }
+
+    pub fn trigger_irq(&mut self, bus: &mut MemoryBus) {
+        let return_addr = self.registers[15].wrapping_add(4);
+        let saved_cpsr = self.cpsr;
+
+        self.switch_mode(0b10010);
+
+        //now in IRQ mode, set banked registers
+        self.registers[14] = return_addr; //R14_irq
+        self.r14_irq = return_addr;
+        self.spsr_irq = saved_cpsr;
+
+        self.cpsr = (self.cpsr & !0x3F) | 0x12 | (1 << 7);
+        self.cpsr &= !(1 << 5);
+        self.registers[15] = 0x00000018;
     }
 
     pub fn apply_shift(
@@ -811,7 +833,11 @@ impl CPU {
         let (op2, carry) = self.decode_op2(instruction);
         self.registers[dest_register as usize] = rn.wrapping_sub(op2);
 
-        if (instruction >> 20) & 1 == 1 {
+        if dest_register == 15 && (instruction >> 20) & 1 == 1 {
+            let spsr = self.get_spsr();
+            self.switch_mode(spsr & 0x1F);
+            self.cpsr = spsr;
+        } else if (instruction >> 20) & 1 == 1 {
             let (n, z, c, v) = self.sub_flags(rn, op2);
             self.set_flags(n, z, c, v);
         }
