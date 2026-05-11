@@ -9,15 +9,25 @@ use sdl2::keyboard::Keycode;
 use sdl2::pixels::PixelFormatEnum;
 
 fn main() {
-    let rom: Vec<u8> = std::fs::read("roms/pokemon.gba").unwrap();
-    let mut bus = memory_bus::MemoryBus::new(rom);
+    let rom: Vec<u8> = std::fs::read("tests/ppu/obj_demo.gba").unwrap();
+    let mut bus = memory_bus::MemoryBus::new(rom); //mem bus setup
+
+    //setup gba bios
     let bios_data = std::fs::read("bios.bin").unwrap();
     bus.bios[..bios_data.len()].copy_from_slice(&bios_data);
+
+    //cpu, ppu
     let mut cpu = cpu::CPU::new();
     let mut ppu = ppu::PPU::new();
 
+    // cpu.registers[13] = 0x03007F00;
+    // cpu.registers[14] = 0x08000000;
     cpu.registers[15] = 0x00000000;
-    cpu.cpsr = 0x600000D3; //supervisor mode
+    cpu.cpsr = 0x000000D3;
+    // cpu.r13_irq = 0x03007FA0;
+    // cpu.r13_svc = 0x03007FE0;
+    // cpu.r13_usr = 0x03007F00;
+    // cpu.r14_usr = 0x08000000;
 
     //SDL2 setup
     let sdl_context = sdl2::init().unwrap();
@@ -33,8 +43,6 @@ fn main() {
         .create_texture_streaming(PixelFormatEnum::RGB24, 240, 160)
         .unwrap();
     let mut event_pump = sdl_context.event_pump().unwrap();
-
-    // dump instructions around the stuck PC so we can decode the loop
 
     let mut frame = 0u32;
     let mut in_rom = false;
@@ -72,7 +80,7 @@ fn main() {
                 let ime = bus.read_u16(0x04000208);
                 let cpsr_irq_disabled = (cpu.cpsr >> 7) & 1 == 1; // bit 7 = I flag
                 if !cpsr_irq_disabled && ime & 1 == 1 && ie & 1 == 1 {
-                    // only fire if IRQs are enabled
+                    //only fire if IRQs are enabled
                     let if_val = bus.read_u16(0x04000202) as u32;
                     bus.write_u16(0x04000202, if_val | 1);
                     cpu.trigger_irq(&mut bus);
@@ -83,17 +91,6 @@ fn main() {
             }
 
             let pc = cpu.registers[15];
-            if pc == 0xFFFFFFFE || pc == 0xFFFFFFFF {
-                println!("Bad PC! Last instruction area: {:#010x}", cpu.registers[14]);
-                // print nearby memory
-                for i in 0..4 {
-                    println!(
-                        "  [{:#010x}] = {:#010x}",
-                        cpu.registers[14].wrapping_sub(8).wrapping_add(i * 4),
-                        bus.read_u32(cpu.registers[14].wrapping_sub(8).wrapping_add(1 * 4) & !1)
-                    );
-                }
-            }
 
             if !in_rom && pc >= 0x08000000 {
                 println!("[frame {frame}] BIOS done — entered ROM at {pc:#010x}");
@@ -140,15 +137,23 @@ fn main() {
 
         frame += 1;
 
+        if cpu.registers[14] == 0 {
+            cpu.registers[14] = 0x08000000;
+        }
+
         //render and display
         let dispcnt = bus.read_u16(0x4000000);
         let mode = dispcnt & 0b111;
         match mode {
-            0 => ppu.render_mode0(&bus.vram, &bus.io, &bus.pallete),
+            0 => ppu.render_mode0(&bus.vram, &bus.io, &bus.palette),
             3 => ppu.render_mode3(&bus.vram),
-            4 => ppu.render_mode4(&bus.vram, &bus.pallete),
-            _ => {}
+            4 => ppu.render_mode4(&bus.vram, &bus.palette),
+            _ => {
+                print!("Unimplemented PPU mode: {:#010x}\n", mode)
+            }
         }
+
+        ppu.render_sprites(&bus.oam, &bus.palette, &bus.vram);
 
         texture.update(None, &ppu.framebuffer, 240 * 3).unwrap();
         canvas.copy(&texture, None, None).unwrap();

@@ -1,5 +1,3 @@
-use sdl2::libc::regmatch_t;
-
 use crate::cpu::CPU;
 use crate::memory_bus::MemoryBus;
 
@@ -628,10 +626,14 @@ impl CPU {
     }
     //swi
     fn execute_swi_thumb(&mut self, bus: &mut MemoryBus) {
+        let saved_cpsr = self.cpsr; // must save before switch_mode modifies CPSR
         self.switch_mode(0b10011);
-        self.r14_svc = self.registers[15].wrapping_add(2);
-        self.spsr_svc = self.cpsr;
+        // registers[15] is already pc+2 (incremented before dispatch in main.rs)
+        self.registers[14] = self.registers[15];
+        self.r14_svc = self.registers[15];
+        self.spsr_svc = saved_cpsr;
         self.cpsr = (self.cpsr & !0x3F) | 0x13 | (1 << 7);
+        self.cpsr &= !(1 << 5); // ARM mode
         self.registers[15] = 0x00000008;
     }
 }

@@ -26,6 +26,8 @@ pub struct CPU {
     pub r13_fiq: u32,
     pub r14_fiq: u32,
     pub spsr_fiq: u32,
+    pub r13_usr: u32,
+    pub r14_usr: u32,
 
     // FIQ also banks R8-R12
     pub r8_fiq: u32,
@@ -59,6 +61,8 @@ impl CPU {
             r13_fiq: 0,
             r14_fiq: 0,
             spsr_fiq: 0,
+            r13_usr: 0,
+            r14_usr: 0,
 
             // FIQ also banks R8-R12
             r8_fiq: 0,
@@ -436,8 +440,40 @@ impl CPU {
                     self.set_flags(n, z, c, v);
                 }
             }
+
+            //UMULL — unsigned multiply long
+            0b0100 => {
+                let result = (rm_reg as u64).wrapping_mul(rs_reg as u64);
+                self.registers[rn as usize] = result as u32; // RdLo
+                self.registers[rd as usize] = (result >> 32) as u32; // RdHi
+                if (instruction >> 20) & 1 == 1 {
+                    let n = (result >> 63) as u32 == 1;
+                    let z = result == 0;
+                    let c = (self.cpsr >> 29) & 1 == 1;
+                    let v = (self.cpsr >> 28) & 1 == 1;
+                    self.set_flags(n, z, c, v);
+                }
+            }
+            //UMLAL — unsigned multiply accumulate long
+            0b0101 => {
+                let rdlo = self.registers[rn as usize] as u64;
+                let rdhi = self.registers[rd as usize] as u64;
+                let existing = (rdhi << 32) | rdlo;
+                let result = (rm_reg as u64)
+                    .wrapping_mul(rs_reg as u64)
+                    .wrapping_add(existing);
+                self.registers[rn as usize] = result as u32;
+                self.registers[rd as usize] = (result >> 32) as u32;
+                if (instruction >> 20) & 1 == 1 {
+                    let n = (result >> 63) as u32 == 1;
+                    let z = result == 0;
+                    let c = (self.cpsr >> 29) & 1 == 1;
+                    let v = (self.cpsr >> 28) & 1 == 1;
+                    self.set_flags(n, z, c, v);
+                }
+            }
             _ => {
-                print!("Unimplemented instruction: {:#034b}\n", instruction);
+                print!("Unimplemented MUL instruction: {:#034b}\n", instruction);
                 todo!()
             }
         }
@@ -523,6 +559,11 @@ impl CPU {
             );
         }
         match self.cpsr & 0x1F {
+            //user
+            0b11111 | 0b10000 => {
+                self.r13_usr = self.registers[13];
+                self.r14_usr = self.registers[14];
+            }
             //supervisor
             0b10011 => {
                 self.r13_svc = self.registers[13];
@@ -558,6 +599,11 @@ impl CPU {
         }
 
         match new_mode {
+            //user
+            0b11111 | 0b10000 => {
+                self.registers[13] = self.r13_usr;
+                self.registers[14] = self.r14_usr;
+            }
             //supervisor
             0b10011 => {
                 self.registers[13] = self.r13_svc;
@@ -592,11 +638,15 @@ impl CPU {
     }
 
     pub fn execute_swi(&mut self, bus: &mut MemoryBus, instruction: u32) {
-        self.switch_mode(0b10011); //save current regs, load svc regs
-        self.r14_svc = self.registers[15].wrapping_add(4); //now set return address
-        self.spsr_svc = self.cpsr; //save current flags
-        self.cpsr = (self.cpsr & !0x3F) | 0x13 | (1 << 7); //switch mode in CPSR
-        self.registers[15] = 0x00000008; //jump to vector
+        let saved_cpsr = self.cpsr; // must save before switch_mode modifies CPSR
+        self.switch_mode(0b10011);
+        // registers[15] is already pc+4 (incremented before dispatch in main.rs)
+        self.registers[14] = self.registers[15];
+        self.r14_svc = self.registers[15];
+        self.spsr_svc = saved_cpsr;
+        self.cpsr = (self.cpsr & !0x3F) | 0x13 | (1 << 7);
+        self.cpsr &= !(1 << 5); // ARM mode
+        self.registers[15] = 0x00000008;
     }
 
     pub fn trigger_irq(&mut self, bus: &mut MemoryBus) {
@@ -715,7 +765,7 @@ impl CPU {
 
     fn read_register(&self, index: u32) -> u32 {
         if index == 15 {
-            self.registers[15].wrapping_add(4)
+            (self.registers[15].wrapping_add(4)) & !3
         } else {
             self.registers[index as usize]
         }
@@ -997,7 +1047,7 @@ impl CPU {
         let rn = self.read_register((instruction >> 16) & 0xF);
         let (op2, carry) = self.decode_op2(instruction);
         let carry = (self.cpsr >> 29) & 1;
-        let result = op2 - rn;
+        let result = op2.wrapping_sub(rn);
         self.registers[rd as usize] = result;
 
         if (instruction >> 20) & 1 == 1 {
