@@ -2,6 +2,7 @@ mod cpu;
 mod memory_bus;
 mod ppu;
 mod thumb;
+mod timer;
 
 extern crate sdl2;
 use sdl2::event::Event;
@@ -9,7 +10,7 @@ use sdl2::keyboard::Keycode;
 use sdl2::pixels::PixelFormatEnum;
 
 fn main() {
-    let rom: Vec<u8> = std::fs::read("tests/ppu/obj_demo.gba").unwrap();
+    let rom: Vec<u8> = std::fs::read("tests/ppu/brin_demo.gba").unwrap();
     let mut bus = memory_bus::MemoryBus::new(rom); //mem bus setup
 
     //setup gba bios
@@ -20,14 +21,9 @@ fn main() {
     let mut cpu = cpu::CPU::new();
     let mut ppu = ppu::PPU::new();
 
-    // cpu.registers[13] = 0x03007F00;
-    // cpu.registers[14] = 0x08000000;
+    //start PC at 0 and CPSR in supervisor mode
     cpu.registers[15] = 0x00000000;
     cpu.cpsr = 0x000000D3;
-    // cpu.r13_irq = 0x03007FA0;
-    // cpu.r13_svc = 0x03007FE0;
-    // cpu.r13_usr = 0x03007F00;
-    // cpu.r14_usr = 0x08000000;
 
     //SDL2 setup
     let sdl_context = sdl2::init().unwrap();
@@ -79,8 +75,15 @@ fn main() {
                 let ie = bus.read_u16(0x04000200);
                 let ime = bus.read_u16(0x04000208);
                 let cpsr_irq_disabled = (cpu.cpsr >> 7) & 1 == 1; // bit 7 = I flag
-                if !cpsr_irq_disabled && ime & 1 == 1 && ie & 1 == 1 {
-                    //only fire if IRQs are enabled
+
+                let dispstat_vblank_irq_enable = (bus.io[4] >> 3) & 1 == 1;
+                let user_irq_handler = bus.read_u32(0x03007FFC);
+                if !cpsr_irq_disabled
+                    && ime & 1 == 1
+                    && ie & 1 == 1
+                    && dispstat_vblank_irq_enable
+                    && user_irq_handler != 0
+                {
                     let if_val = bus.read_u16(0x04000202) as u32;
                     bus.write_u16(0x04000202, if_val | 1);
                     cpu.trigger_irq(&mut bus);
@@ -106,6 +109,37 @@ fn main() {
                 let instruction = bus.read_u32(pc);
                 cpu.registers[15] = pc.wrapping_add(4);
                 cpu.execute_instruction(&mut bus, instruction);
+            }
+
+            for i in 0..4 {
+                let overflow = if bus.timers[i].cascade && i > 0 {
+                    false
+                } else {
+                    bus.timers[i].tick(1)
+                };
+
+                if overflow {
+                    //fire irq
+                    if bus.timers[i].irq_enabled {
+                        let ie = bus.read_u16(0x04000200);
+                        let ime = bus.read_u16(0x04000208);
+                        let cpsr_irq_disabled = (cpu.cpsr >> 7) & 1 == 1;
+                        if !cpsr_irq_disabled && ime & 1 == 1 && (ie >> (3 + i)) & 1 == 1 {
+                            let if_val = bus.read_u16(0x04000202) as u32;
+                            bus.write_u16(0x04000202, if_val | (1 << (3 + i)));
+                            cpu.trigger_irq(&mut bus);
+                        }
+                    }
+
+                    //cascade to next timer
+                    if i < 3 && bus.timers[i + 1].cascade {
+                        bus.timers[i + 1].counter = bus.timers[i + 1].counter.wrapping_add(1);
+                        if bus.timers[i + 1].counter == 0 {
+                            bus.timers[i + 1].counter = bus.timers[i + 1].reload;
+                            //could also fire IRQ for timer i+1 here (TODO)
+                        }
+                    }
+                }
             }
         }
 
@@ -137,9 +171,9 @@ fn main() {
 
         frame += 1;
 
-        if cpu.registers[14] == 0 {
-            cpu.registers[14] = 0x08000000;
-        }
+        // if cpu.registers[14] == 0 {
+        //     cpu.registers[14] = 0x08000000;
+        // }
 
         //render and display
         let dispcnt = bus.read_u16(0x4000000);
@@ -147,13 +181,13 @@ fn main() {
         match mode {
             0 => ppu.render_mode0(&bus.vram, &bus.io, &bus.palette),
             3 => ppu.render_mode3(&bus.vram),
-            4 => ppu.render_mode4(&bus.vram, &bus.palette),
+            4 => ppu.render_mode4(&bus.vram, &bus.palette, &bus.io),
             _ => {
                 print!("Unimplemented PPU mode: {:#010x}\n", mode)
             }
         }
 
-        ppu.render_sprites(&bus.oam, &bus.palette, &bus.vram);
+        ppu.render_sprites(&bus.oam, &bus.palette, &bus.vram, dispcnt);
 
         texture.update(None, &ppu.framebuffer, 240 * 3).unwrap();
         canvas.copy(&texture, None, None).unwrap();

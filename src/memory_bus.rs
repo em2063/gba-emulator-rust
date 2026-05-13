@@ -1,5 +1,7 @@
+use crate::timer::Timer;
+
 pub struct MemoryBus {
-    rom: Vec<u8>,
+    pub rom: Vec<u8>,
     pub bios: [u8; 16 * 1024], //system rom
     ewram: [u8; 256 * 1024],   //on-board work RAM
     iwram: [u8; 32 * 1024],    //on-chip work RAM
@@ -8,6 +10,7 @@ pub struct MemoryBus {
     pub vram: [u8; 96 * 1024], //virtual ram
     pub oam: [u8; 1024],       //object ram
     sram: [u8; 64 * 1024],
+    pub timers: [Timer; 4],
 }
 
 impl MemoryBus {
@@ -22,6 +25,7 @@ impl MemoryBus {
             vram: [0; 96 * 1024],   //virtual ram
             oam: [0; 1024],         //object ram
             sram: [0; 64 * 1024],
+            timers: [Timer::new(), Timer::new(), Timer::new(), Timer::new()],
         }
     }
 
@@ -127,7 +131,9 @@ impl MemoryBus {
             0x03000000..=0x03FFFFFF => self.iwram[((addr - 0x03000000) & 0x7FFF) as usize] = value,
             0x04000000..=0x040003FE => self.io[(addr - 0x04000000) as usize] = value,
             0x05000000..=0x050003FF => self.palette[(addr - 0x05000000) as usize] = value,
-            0x06000000..=0x06017FFF => self.vram[(addr - 0x06000000) as usize] = value,
+            0x06000000..=0x06017FFF => {
+                self.vram[(addr - 0x06000000) as usize] = value;
+            }
             0x0E000000..=0x0E00FFFF => self.sram[(addr - 0x0E000000) as usize] = value,
             0x07000000..=0x07FFFFFF => self.oam[((addr - 0x07000000) & 0x3FF) as usize] = value,
             _ => {}
@@ -135,17 +141,35 @@ impl MemoryBus {
     }
 
     pub fn read_u16(&mut self, addr: u32) -> u16 {
-        let b0 = self.read_u8(addr) as u16;
-        let b1 = self.read_u8(addr.wrapping_add(1)) as u16;
-        b0 | (b1 << 8)
+        match addr {
+            0x04000100 => self.timers[0].counter,
+            0x04000104 => self.timers[1].counter,
+            0x04000108 => self.timers[2].counter,
+            0x0400010C => self.timers[3].counter,
+            _ => {
+                let b0 = self.read_u8(addr) as u16;
+                let b1 = self.read_u8(addr.wrapping_add(1)) as u16;
+                b0 | (b1 << 8)
+            }
+        }
     }
 
     pub fn write_u16(&mut self, addr: u32, value: u32) {
         self.write_u8_internal(addr, (value & 0xFF) as u8);
         self.write_u8_internal(addr.wrapping_add(1), ((value >> 8) & 0xFF) as u8);
 
-        //check if it is a direct memory access register
         match addr {
+            //check for timer reload
+            0x04000100 => self.timers[0].reload = value as u16,
+            0x04000104 => self.timers[1].reload = value as u16,
+            0x04000108 => self.timers[2].reload = value as u16,
+            0x0400010C => self.timers[3].reload = value as u16,
+            //check if it is updting timer registers
+            0x04000102 => self.timers[0].update_control(value as u16),
+            0x04000106 => self.timers[1].update_control(value as u16),
+            0x0400010A => self.timers[2].update_control(value as u16),
+            0x0400010E => self.timers[3].update_control(value as u16),
+            //check if it is a direct memory access register
             0x040000BA => self.check_dma(0, value), //DMA0 control
             0x040000C6 => self.check_dma(1, value), //DMA1 control
             0x040000D2 => self.check_dma(2, value), //DMA2 control

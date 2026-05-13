@@ -20,7 +20,11 @@ impl CPU {
                 let bits_15_12 = (instruction >> 12) & 0xF;
                 match bits_15_12 {
                     0b1101 => {
-                        self.execute_conditional_branch(instruction);
+                        if (instruction >> 8) & 0xF == 0xF {
+                            self.execute_swi_thumb(bus, instruction);
+                        } else {
+                            self.execute_conditional_branch(instruction);
+                        }
                     }
                     0b1100 => self.execute_multiple_ldr_str(bus, instruction),
                     0b1000 => self.execute_ldr_str_halfword(bus, instruction),
@@ -33,7 +37,13 @@ impl CPU {
                             self.execute_ldr_str_sign_extended(bus, instruction);
                         }
                     }
-                    0b1011 => self.execute_push_pop_registers(bus, instruction),
+                    0b1011 => {
+                        if (instruction >> 10) & 1 == 0 {
+                            self.execute_offset_stack_pointer(instruction)
+                        } else {
+                            self.execute_push_pop_registers(bus, instruction)
+                        }
+                    }
                     _ => {
                         let bits_15_11 = (instruction >> 11) & 0b11111;
                         match bits_15_11 {
@@ -48,19 +58,10 @@ impl CPU {
                                     0b010000 => self.decode_thumb_alu(instruction),
                                     0b010001 => self.execute_hi_register_ops(instruction),
                                     _ => {
-                                        let bits_15_8 = (instruction >> 8) & 0xFF;
-                                        match bits_15_8 {
-                                            0b10110000 => {
-                                                self.execute_offset_stack_pointer(instruction)
-                                            }
-                                            0b11011111 => self.execute_swi_thumb(bus),
-                                            _ => {
-                                                println!(
-                                                    "unimplemented instruction: {:#034b} at PC: {:#010x}",
-                                                    instruction, self.registers[15]
-                                                );
-                                            }
-                                        }
+                                        println!(
+                                            "unimplemented instruction: {:#034b} at PC: {:#010x}",
+                                            instruction, self.registers[15]
+                                        )
                                     }
                                 }
                             }
@@ -469,7 +470,7 @@ impl CPU {
         let source_dest = instruction & 0b111;
 
         let address = rb.wrapping_add((offset as u32) << 1);
-        if (instruction >> 11) == 1 {
+        if (instruction >> 11) & 1 == 1 {
             self.registers[source_dest as usize] = bus.read_u16(address as u32) as u32;
         } else {
             bus.write_u16(address, self.registers[source_dest as usize] as u32);
@@ -482,7 +483,7 @@ impl CPU {
         let offset = (instruction & 0xFF) << 2;
 
         let address = self.registers[13].wrapping_add(offset as u32);
-        if instruction >> 11 == 0 {
+        if (instruction >> 11) & 1 == 0 {
             bus.write_u32(address, self.registers[rd as usize] as u32);
         } else {
             self.registers[rd as usize] = bus.read_u32(address as u32) as u32;
@@ -625,7 +626,13 @@ impl CPU {
         }
     }
     //swi
-    fn execute_swi_thumb(&mut self, bus: &mut MemoryBus) {
+    fn execute_swi_thumb(&mut self, bus: &mut MemoryBus, instruction: u16) {
+        let swi_num = instruction & 0xFF;
+        if swi_num == 0x05 {
+            bus.write_u16(0x04000208, 1); // enable IME
+            return;
+        }
+
         let saved_cpsr = self.cpsr; // must save before switch_mode modifies CPSR
         self.switch_mode(0b10011);
         // registers[15] is already pc+2 (incremented before dispatch in main.rs)

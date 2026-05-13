@@ -493,16 +493,27 @@ impl CPU {
                 self.registers[(instruction & 0xF) as usize]
             };
 
-            let psr = if source_dest == 0 {
-                &mut self.cpsr
+            if source_dest == 0 {
+                if (instruction >> 19) & 1 == 1 {
+                    self.cpsr = (self.cpsr & 0x00FFFFFF) | (value & 0xFF000000);
+                }
+                if (instruction >> 16) & 1 == 1 {
+                    let new_mode = value & 0x1F;
+                    let old_mode = self.cpsr & 0x1F;
+                    if new_mode != old_mode {
+                        self.switch_mode(new_mode); //swaps banked regs, updates mode bits in CPSR
+                    }
+                    self.cpsr = (self.cpsr & !0xE0) | (value & 0xE0);
+                }
             } else {
-                &mut self.spsr
-            };
-            if (instruction >> 19) & 1 == 1 {
-                *psr = (*psr & 0x00FFFFFF) | (value & 0xFF000000);
-            }
-            if (instruction >> 16) & 1 == 1 {
-                *psr = (*psr & 0xFFFFFF00) | (value & 0x000000FF);
+                let mut spsr = self.get_spsr();
+                if (instruction >> 19) & 1 == 1 {
+                    spsr = (spsr & 0x00FFFFFF) | (value & 0xFF000000);
+                }
+                if (instruction >> 16) & 1 == 1 {
+                    spsr = (spsr & 0xFFFFFF00) | (value & 0x000000FF);
+                }
+                self.set_spsr(spsr);
             }
         } else {
             //MRS - read from psr to register
@@ -510,7 +521,7 @@ impl CPU {
             self.registers[rd as usize] = if source_dest == 0 {
                 self.cpsr
             } else {
-                self.spsr
+                self.get_spsr()
             };
         }
     }
@@ -638,6 +649,12 @@ impl CPU {
     }
 
     pub fn execute_swi(&mut self, bus: &mut MemoryBus, instruction: u32) {
+        let swi_num = (instruction >> 16) & 0xFF;
+        if swi_num == 0x05 {
+            bus.write_u16(0x04000208, 1); // enable IME
+            return; // don't jump to BIOS
+        }
+
         let saved_cpsr = self.cpsr; // must save before switch_mode modifies CPSR
         self.switch_mode(0b10011);
         // registers[15] is already pc+4 (incremented before dispatch in main.rs)
@@ -730,9 +747,6 @@ impl CPU {
 
     //decodes operand between loading as an immediate value or deducing from a register
     fn decode_op2(&mut self, instruction: u32) -> (u32, bool) {
-        if instruction == 0x00000000 {
-            println!("zero instruction at PC: {:#010x}", self.registers[15]);
-        }
         let op_flag = (instruction >> 25) & 1;
         let carry_in = (self.cpsr >> 29) & 1 == 1;
 
@@ -841,6 +855,17 @@ impl CPU {
             0b10111 => self.spsr_abt,
             0b11011 => self.spsr_und,
             _ => self.cpsr,
+        }
+    }
+
+    fn set_spsr(&mut self, value: u32) {
+        match self.cpsr & 0x1F {
+            0b10011 => self.spsr_svc = value,
+            0b10010 => self.spsr_irq = value,
+            0b10001 => self.spsr_fiq = value,
+            0b10111 => self.spsr_abt = value,
+            0b11011 => self.spsr_und = value,
+            _ => {} // User/System mode
         }
     }
 
