@@ -2,18 +2,94 @@ use std::io;
 
 use crate::memory_bus::MemoryBus;
 
+pub enum PpuMode {
+    Oam,
+    Drawing,
+    HBlank,
+    Vblank,
+}
+
 pub struct PPU {
     pub framebuffer: [u8; 240 * 160 * 3], //240 x 160 GBA display (RGB pixels)
+    pub vcount: u16,
+    pub line_cycle: u16,
+    pub mode: PpuMode,
 }
 
 impl PPU {
     pub fn new() -> PPU {
         PPU {
             framebuffer: [0; 240 * 160 * 3],
+            vcount: 0,
+            line_cycle: 0,
+            mode: PpuMode::Oam,
         }
     }
 
-    pub fn render_mode0(&mut self, vram: &[u8; 96 * 1024], io: &[u8; 0x400], palette: &[u8; 1024]) {
+    pub fn tick(&mut self, bus: &mut MemoryBus) {
+        self.line_cycle += 1;
+        if self.line_cycle == 960 {
+            self.enter_hblank(bus);
+        }
+        if self.line_cycle == 1232 {
+            self.end_scanline(bus);
+            self.line_cycle = 0;
+            self.vcount = (self.vcount + 1) % 228;
+            self.update_vcount_register(bus);
+        }
+    }
+
+    fn enter_hblank(&mut self, bus: &mut MemoryBus) {
+        bus.io[4] |= 0x02; //set DISPSTAT hblank bit
+        bus.trigger_hblank_dma(); //hblank dma triggered every visible line
+
+        //optional addition: triggert stat hblank irq
+    }
+
+    fn end_scanline(&mut self, bus: &mut MemoryBus) {
+        bus.io[4] &= !0x02;
+
+        if self.vcount < 160 {
+            self.render_current_line(bus);
+        }
+
+        self.vcount = (self.vcount + 1) % 228;
+        self.update_vcount_register(bus);
+
+        if self.vcount == 160 {
+            bus.io[4] |= 0x02;
+            self.mode = PpuMode::Vblank;
+            bus.trigger_vblank_dma();
+        }
+
+        if self.vcount == 0 {
+            bus.io[4] &= !0x01;
+            self.mode = PpuMode::Oam;
+        }
+    }
+
+    fn update_vcount_register(&self, bus: &mut MemoryBus) {
+        bus.io[6] = (self.vcount & 0xFF) as u8;
+        bus.io[7] = (self.vcount >> 8) as u8;
+    }
+
+    fn render_current_line(&mut self, bus: &mut MemoryBus) {
+        let mode = bus.read_u16(0x04000000) & 0b111;
+        match mode {
+            0 => self.render_mode0(self.vcount as usize, &bus.vram, &bus.io, &bus.palette),
+            3 => self.render_mode3(self.vcount as usize, &bus.vram),
+            4 => self.render_mode4(self.vcount as usize, &bus.vram, &bus.palette, &bus.io),
+            _ => {}
+        }
+    }
+
+    pub fn render_mode0(
+        &mut self,
+        line: usize,
+        vram: &[u8; 96 * 1024],
+        io: &[u8; 0x400],
+        palette: &[u8; 1024],
+    ) {
         let dispcnt = io[0] as u16 | ((io[1] as u16) << 8);
 
         //fill with backdrop color (BG palette entry 0)
@@ -23,7 +99,7 @@ impl PPU {
             (((bd >> 5) & 0x1F) as u8) << 3,
             (((bd >> 10) & 0x1F) as u8) << 3,
         );
-        for i in 0..(240 * 160) {
+        for i in 0..240usize {
             self.framebuffer[i * 3] = bd_r;
             self.framebuffer[i * 3 + 1] = bd_g;
             self.framebuffer[i * 3 + 2] = bd_b;
@@ -45,96 +121,97 @@ impl PPU {
             let hofs = (hofs & 0x1FF) as usize;
             let vofs = (vofs & 0x1FF) as usize;
 
-            for screen_y in 0..160usize {
-                for screen_x in 0..240usize {
-                    //map position accounts for scroll
-                    let map_x = (screen_x + hofs) % 512;
-                    let map_y = (screen_y + vofs) % 512;
+            let screen_y = line;
+            for screen_x in 0..240usize {
+                //map position accounts for scroll
+                let map_x = (screen_x + hofs) % 512;
+                let map_y = (screen_y + vofs) % 512;
 
-                    //which tile in the map
-                    let tile_x = map_x / 8;
-                    let tile_y = map_y / 8;
+                //which tile in the map
+                let tile_x = map_x / 8;
+                let tile_y = map_y / 8;
 
-                    //pixels within tile
-                    let px = map_x % 8;
-                    let py = map_y % 8;
+                //pixels within tile
+                let px = map_x % 8;
+                let py = map_y % 8;
 
-                    let screen_size = (bgcnt >> 14) & 0b11; // bits 14-15 of BGCNT
-                    let (tx, ty) = (tile_x % 32, tile_y % 32);
-                    let block_x = tile_x / 32;
-                    let block_y = tile_y / 32;
-                    let block_offset = match screen_size {
-                        0 => 0,                     //256x256 — single block
-                        1 => block_x,               //512x256 — 2 blocks wide
-                        2 => block_y,               //256x512 — 2 blocks tall
-                        3 => block_y * 2 + block_x, //512x512 — 4 blocks
-                        _ => 0,
-                    };
-                    let entry_idx = ty * 32 + tx;
-                    let e0 = screen_base + block_offset * 2048 + entry_idx * 2;
-                    if e0 + 1 >= vram.len() {
-                        continue;
-                    }
-                    let entry = vram[e0] as u16 | ((vram[e0 + 1] as u16) << 8);
-
-                    let tile_num = (entry & 0x3FF) as usize;
-                    let flip_h = (entry >> 10) & 1 == 1;
-                    let flip_v = (entry >> 11) & 1 == 1;
-                    let pal_base = if is_8bpp {
-                        0
-                    } else {
-                        ((entry >> 12) & 0xF) as usize * 16
-                    };
-
-                    let sy = if flip_v { 7 - py } else { py };
-                    let sx = if flip_h { 7 - px } else { px };
-
-                    let colour_index = if is_8bpp {
-                        let off = char_base + tile_num * 64 + sy * 8 + sx;
-                        if off >= vram.len() {
-                            continue;
-                        }
-                        vram[off] as usize
-                    } else {
-                        let off = char_base + tile_num * 32 + sy * 4 + sx / 2;
-                        if off >= vram.len() {
-                            continue;
-                        }
-                        let byte = vram[off];
-                        if sx % 2 == 0 {
-                            (byte & 0xF) as usize
-                        } else {
-                            ((byte >> 4) & 0xF) as usize
-                        }
-                    };
-
-                    if colour_index == 0 {
-                        continue;
-                    } // transparent
-
-                    let pal_idx = (pal_base + colour_index) * 2;
-                    if pal_idx + 1 >= palette.len() {
-                        continue;
-                    }
-                    let colour = palette[pal_idx] as u16 | ((palette[pal_idx + 1] as u16) << 8);
-                    let r = ((colour & 0x1F) as u8) << 3;
-                    let g = (((colour >> 5) & 0x1F) as u8) << 3;
-                    let b = (((colour >> 10) & 0x1F) as u8) << 3;
-
-                    let fb_idx = (screen_y * 240 + screen_x) * 3;
-                    self.framebuffer[fb_idx] = r;
-                    self.framebuffer[fb_idx + 1] = g;
-                    self.framebuffer[fb_idx + 2] = b;
+                let screen_size = (bgcnt >> 14) & 0b11; // bits 14-15 of BGCNT
+                let (tx, ty) = (tile_x % 32, tile_y % 32);
+                let block_x = tile_x / 32;
+                let block_y = tile_y / 32;
+                let block_offset = match screen_size {
+                    0 => 0,                     //256x256 — single block
+                    1 => block_x,               //512x256 — 2 blocks wide
+                    2 => block_y,               //256x512 — 2 blocks tall
+                    3 => block_y * 2 + block_x, //512x512 — 4 blocks
+                    _ => 0,
+                };
+                let entry_idx = ty * 32 + tx;
+                let e0 = screen_base + block_offset * 2048 + entry_idx * 2;
+                if e0 + 1 >= vram.len() {
+                    continue;
                 }
+                let entry = vram[e0] as u16 | ((vram[e0 + 1] as u16) << 8);
+
+                let tile_num = (entry & 0x3FF) as usize;
+                let flip_h = (entry >> 10) & 1 == 1;
+                let flip_v = (entry >> 11) & 1 == 1;
+                let pal_base = if is_8bpp {
+                    0
+                } else {
+                    ((entry >> 12) & 0xF) as usize * 16
+                };
+
+                let sy = if flip_v { 7 - py } else { py };
+                let sx = if flip_h { 7 - px } else { px };
+
+                let colour_index = if is_8bpp {
+                    let off = char_base + tile_num * 64 + sy * 8 + sx;
+                    if off >= vram.len() {
+                        continue;
+                    }
+                    vram[off] as usize
+                } else {
+                    let off = char_base + tile_num * 32 + sy * 4 + sx / 2;
+                    if off >= vram.len() {
+                        continue;
+                    }
+                    let byte = vram[off];
+                    if sx % 2 == 0 {
+                        (byte & 0xF) as usize
+                    } else {
+                        ((byte >> 4) & 0xF) as usize
+                    }
+                };
+
+                if colour_index == 0 {
+                    continue;
+                } // transparent
+
+                let pal_idx = (pal_base + colour_index) * 2;
+                if pal_idx + 1 >= palette.len() {
+                    continue;
+                }
+                let colour = palette[pal_idx] as u16 | ((palette[pal_idx + 1] as u16) << 8);
+                let r = ((colour & 0x1F) as u8) << 3;
+                let g = (((colour >> 5) & 0x1F) as u8) << 3;
+                let b = (((colour >> 10) & 0x1F) as u8) << 3;
+
+                let fb_idx = (screen_y * 240 + screen_x) * 3;
+                self.framebuffer[fb_idx] = r;
+                self.framebuffer[fb_idx + 1] = g;
+                self.framebuffer[fb_idx + 2] = b;
             }
         }
     }
 
     //Renders BG3 (bitmap-based, 1 tile, no pallete)
-    pub fn render_mode3(&mut self, vram: &[u8; 96 * 1024]) {
-        for i in 0..(240 * 160) {
-            let byte0 = vram[i * 2] as u16;
-            let byte1 = vram[i * 2 + 1] as u16;
+    pub fn render_mode3(&mut self, line: usize, vram: &[u8; 96 * 1024]) {
+        let screen_y = line;
+        for screen_x in 0..240usize {
+            let pixel_offset = (screen_y * 240 + screen_x) * 2; //2 byte pixels
+            let byte0 = vram[pixel_offset] as u16;
+            let byte1 = vram[pixel_offset + 1] as u16;
             let colour = byte0 | (byte1 << 8);
 
             let r = (colour & 0x1F) as u8;
@@ -145,23 +222,29 @@ impl PPU {
             let g = g << 3;
             let b = b << 3;
 
-            self.framebuffer[i * 3] = r;
-            self.framebuffer[i * 3 + 1] = g;
-            self.framebuffer[i * 3 + 2] = b;
+            let fb_idx = (screen_y * 240 + screen_x) * 3;
+            self.framebuffer[fb_idx] = r;
+            self.framebuffer[fb_idx + 1] = g;
+            self.framebuffer[fb_idx + 2] = b;
         }
     }
 
     //render mode 4, extracting colour used from pallete RAM
     pub fn render_mode4(
         &mut self,
+        line: usize,
         vram: &[u8; 96 * 1024],
         palette_ram: &[u8; 1024],
         io: &[u8; 0x400],
     ) {
         let dispcnt = io[0] as u16 | ((io[1] as u16) << 8);
         let page_base = if (dispcnt >> 4) & 1 == 1 { 0xA000 } else { 0 };
-        for i in 0..(240 * 160) {
-            let index = vram[page_base + i] as usize;
+        let screen_y = line;
+
+        for screen_x in 0..240 {
+            let vram_offset = page_base + screen_y * 240 + screen_x; //fixed
+            let index = vram[vram_offset] as usize;
+
             let byte0 = palette_ram[index * 2] as u16;
             let byte1 = palette_ram[index * 2 + 1] as u16;
             let colour = byte0 | (byte1 << 8);
@@ -174,9 +257,10 @@ impl PPU {
             let g = g << 3;
             let b = b << 3;
 
-            self.framebuffer[i * 3] = r;
-            self.framebuffer[i * 3 + 1] = g;
-            self.framebuffer[i * 3 + 2] = b;
+            let fb_idx = (screen_y * 240 + screen_x) * 3; //fixed
+            self.framebuffer[fb_idx] = r;
+            self.framebuffer[fb_idx + 1] = g;
+            self.framebuffer[fb_idx + 2] = b;
         }
     }
 
@@ -325,7 +409,7 @@ mod tests {
         bus.palette[2] = 0x1F;
         bus.palette[3] = 0x00;
 
-        ppu.render_mode4(&bus.vram, &bus.palette, &bus.io);
+        ppu.render_mode4(0, &bus.vram, &bus.palette, &bus.io);
 
         assert_eq!(ppu.framebuffer[0], 248)
     }

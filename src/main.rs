@@ -10,7 +10,7 @@ use sdl2::keyboard::Keycode;
 use sdl2::pixels::PixelFormatEnum;
 
 fn main() {
-    let rom: Vec<u8> = std::fs::read("tests/ppu/brin_demo.gba").unwrap();
+    let rom: Vec<u8> = std::fs::read("tests/ppu/win_demo.gba").unwrap();
     let mut bus = memory_bus::MemoryBus::new(rom); //mem bus setup
 
     //setup gba bios
@@ -57,8 +57,10 @@ fn main() {
             }
         }
 
+        let mut last_mirror = 0u32;
         let mut vblank_irq_fired = false;
         for _cycle in 0..280896u32 {
+            ppu.tick(&mut bus);
             let vcount = (_cycle / 1232) % 228;
             bus.io[6] = vcount as u8; //VCOUNT low byte
             bus.io[7] = (vcount >> 8) as u8; //VCOUNT high byte
@@ -88,10 +90,18 @@ fn main() {
                     bus.write_u16(0x04000202, if_val | 1);
                     cpu.trigger_irq(&mut bus);
                 }
+                bus.trigger_vblank_dma();
             }
             if vcount == 0 {
                 vblank_irq_fired = false;
             }
+
+            cpu.registers[15] = match cpu.registers[15] >> 24 {
+                0x09 => cpu.registers[15] - 0x01000000,
+                0x0A | 0x0B => cpu.registers[15] - 0x02000000,
+                0x0C | 0x0D => cpu.registers[15] - 0x04000000,
+                _ => cpu.registers[15],
+            };
 
             let pc = cpu.registers[15];
 
@@ -109,6 +119,21 @@ fn main() {
                 let instruction = bus.read_u32(pc);
                 cpu.registers[15] = pc.wrapping_add(4);
                 cpu.execute_instruction(&mut bus, instruction);
+            }
+
+            let mirror = cpu.registers[15] >> 24;
+            if mirror != last_mirror && mirror >= 8 {
+                // println!(
+                //      "[cycle {}] Mirror change: 0x{:02x} -> 0x{:02x}, PC={:#010x}, LR={:#010x}, SP={:#010x}, CPSR={:#010x}",
+                //     _cycle,
+                //     last_mirror,
+                //     mirror,
+                //     cpu.registers[15],
+                //     cpu.registers[14],
+                //     cpu.registers[13],
+                //     cpu.cpsr
+                // );
+                last_mirror = mirror;
             }
 
             for i in 0..4 {
@@ -141,6 +166,9 @@ fn main() {
                     }
                 }
             }
+            if vcount < 160 && _cycle % 1232 == 960 {
+                bus.trigger_hblank_dma();
+            }
         }
 
         let dispcnt = bus.read_u16(0x04000000);
@@ -170,22 +198,6 @@ fn main() {
         }
 
         frame += 1;
-
-        // if cpu.registers[14] == 0 {
-        //     cpu.registers[14] = 0x08000000;
-        // }
-
-        //render and display
-        let dispcnt = bus.read_u16(0x4000000);
-        let mode = dispcnt & 0b111;
-        match mode {
-            0 => ppu.render_mode0(&bus.vram, &bus.io, &bus.palette),
-            3 => ppu.render_mode3(&bus.vram),
-            4 => ppu.render_mode4(&bus.vram, &bus.palette, &bus.io),
-            _ => {
-                print!("Unimplemented PPU mode: {:#010x}\n", mode)
-            }
-        }
 
         ppu.render_sprites(&bus.oam, &bus.palette, &bus.vram, dispcnt);
 

@@ -118,6 +118,7 @@ impl CPU {
             _ => {
                 let bits_27_25 = (instruction >> 25) & 0b111;
                 match bits_27_25 {
+                    0b110 | 0b111 => {}
                     0b010 | 0b011 => self.execute_ldr_str(bus, instruction),
                     0b000 | 0b001 => {
                         if (instruction >> 8) & 0xFFFFF == 0b00010010111111111111 {
@@ -181,7 +182,17 @@ impl CPU {
         for i in 0..16usize {
             if (rlist >> i) & 1 == 1 {
                 if load == 1 {
-                    self.registers[i] = bus.read_u32(address);
+                    let value = bus.read_u32(address);
+                    if i == 15 {
+                        self.registers[15] = value & !1;
+                        if value & 1 == 1 {
+                            self.cpsr |= 1 << 5;
+                        } else {
+                            self.cpsr &= !(1 << 5);
+                        }
+                    } else {
+                        self.registers[i] = value;
+                    }
                 } else {
                     bus.write_u32(address, self.registers[i]);
                 }
@@ -293,8 +304,8 @@ impl CPU {
                 let rm = self.read_register(source_register);
                 offset = match (instruction >> 5) & 0b11 {
                     0b0 => rm,
-                    0b1 => rm >> shift,
-                    0b10 => ((rm as i32) >> shift) as u32,
+                    0b1 => rm.wrapping_shr(shift),
+                    0b10 => ((rm as i32).wrapping_shr(shift)) as u32,
                     0b11 => rm.rotate_right(shift),
                     _ => todo!(),
                 };
@@ -331,7 +342,17 @@ impl CPU {
             if b == 1 {
                 self.registers[rd_idx] = bus.read_u8(address) as u32;
             } else {
-                self.registers[rd_idx] = bus.read_u32(address);
+                let value = bus.read_u32(address);
+                if rd_idx == 15 {
+                    self.registers[15] = value & !1;
+                    if value & 1 == 1 {
+                        self.cpsr |= 1 << 5;
+                    } else {
+                        self.cpsr &= !(1 << 5);
+                    }
+                } else {
+                    self.registers[rd_idx] = value;
+                }
             }
         } else {
             // STR
@@ -667,7 +688,7 @@ impl CPU {
     }
 
     pub fn trigger_irq(&mut self, bus: &mut MemoryBus) {
-        let return_addr = self.registers[15].wrapping_add(4);
+        let return_addr = self.registers[15];
         let saved_cpsr = self.cpsr;
 
         self.switch_mode(0b10010);
@@ -873,17 +894,30 @@ impl CPU {
     fn execute_mov(&mut self, instruction: u32) {
         let dest = (instruction >> 12) & 0xF;
         let (op2, carry) = self.decode_op2(instruction);
-        //execute mov instruction
-        self.registers[dest as usize] = op2;
 
-        if dest == 15 && (instruction >> 20) & 1 == 1 {
-            // MOVS PC — restore CPSR from SPSR and switch mode
-            let spsr = self.get_spsr();
-            self.switch_mode(spsr & 0x1F);
-            self.cpsr = spsr;
-        } else if (instruction >> 20) & 1 == 1 {
-            let (n, z, c, v) = self.logical_flags(op2, carry);
-            self.set_flags(n, z, c, v);
+        if dest == 15 {
+            let target = op2 & !1;
+            self.registers[15] = target;
+
+            if (instruction >> 20) & 1 == 1 {
+                // MOVS PC
+                let spsr = self.get_spsr();
+                self.switch_mode(spsr & 0x1F);
+                self.cpsr = spsr;
+            } else {
+                // MOV PC
+                if op2 & 1 == 1 {
+                    self.cpsr |= 1 << 5;
+                } else {
+                    self.cpsr &= !(1 << 5);
+                }
+            }
+        } else {
+            self.registers[dest as usize] = op2;
+            if (instruction >> 20) & 1 == 1 {
+                let (n, z, c, v) = self.logical_flags(op2, carry);
+                self.set_flags(n, z, c, v);
+            }
         }
     }
 
@@ -910,6 +944,13 @@ impl CPU {
 
         if dest_register == 15 && (instruction >> 20) & 1 == 1 {
             let spsr = self.get_spsr();
+            println!(
+                "SUBS PC: LR={:#010x} -> PC={:#010x}, SPSR={:#010x} (restoring mode {:#04x})",
+                rn,
+                rn.wrapping_sub(op2),
+                spsr,
+                spsr & 0x1F
+            );
             self.switch_mode(spsr & 0x1F);
             self.cpsr = spsr;
         } else if (instruction >> 20) & 1 == 1 {
