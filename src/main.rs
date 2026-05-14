@@ -10,7 +10,7 @@ use sdl2::keyboard::Keycode;
 use sdl2::pixels::PixelFormatEnum;
 
 fn main() {
-    let rom: Vec<u8> = std::fs::read("tests/ppu/win_demo.gba").unwrap();
+    let rom: Vec<u8> = std::fs::read("tests/ppu/octtest.gba").unwrap();
     let mut bus = memory_bus::MemoryBus::new(rom); //mem bus setup
 
     //setup gba bios
@@ -58,43 +58,8 @@ fn main() {
         }
 
         let mut last_mirror = 0u32;
-        let mut vblank_irq_fired = false;
         for _cycle in 0..280896u32 {
             ppu.tick(&mut bus);
-            let vcount = (_cycle / 1232) % 228;
-            bus.io[6] = vcount as u8; //VCOUNT low byte
-            bus.io[7] = (vcount >> 8) as u8; //VCOUNT high byte
-
-            //update DISPSTAT vblank flag
-            if vcount >= 160 {
-                bus.io[4] |= 1; //set vblank bit
-            } else {
-                bus.io[4] &= !1; //clear vblank bit
-            }
-
-            if vcount == 160 && !vblank_irq_fired {
-                vblank_irq_fired = true;
-                let ie = bus.read_u16(0x04000200);
-                let ime = bus.read_u16(0x04000208);
-                let cpsr_irq_disabled = (cpu.cpsr >> 7) & 1 == 1; // bit 7 = I flag
-
-                let dispstat_vblank_irq_enable = (bus.io[4] >> 3) & 1 == 1;
-                let user_irq_handler = bus.read_u32(0x03007FFC);
-                if !cpsr_irq_disabled
-                    && ime & 1 == 1
-                    && ie & 1 == 1
-                    && dispstat_vblank_irq_enable
-                    && user_irq_handler != 0
-                {
-                    let if_val = bus.read_u16(0x04000202) as u32;
-                    bus.write_u16(0x04000202, if_val | 1);
-                    cpu.trigger_irq(&mut bus);
-                }
-                bus.trigger_vblank_dma();
-            }
-            if vcount == 0 {
-                vblank_irq_fired = false;
-            }
 
             cpu.registers[15] = match cpu.registers[15] >> 24 {
                 0x09 => cpu.registers[15] - 0x01000000,
@@ -123,16 +88,6 @@ fn main() {
 
             let mirror = cpu.registers[15] >> 24;
             if mirror != last_mirror && mirror >= 8 {
-                // println!(
-                //      "[cycle {}] Mirror change: 0x{:02x} -> 0x{:02x}, PC={:#010x}, LR={:#010x}, SP={:#010x}, CPSR={:#010x}",
-                //     _cycle,
-                //     last_mirror,
-                //     mirror,
-                //     cpu.registers[15],
-                //     cpu.registers[14],
-                //     cpu.registers[13],
-                //     cpu.cpsr
-                // );
                 last_mirror = mirror;
             }
 
@@ -166,29 +121,26 @@ fn main() {
                     }
                 }
             }
-            if vcount < 160 && _cycle % 1232 == 960 {
-                bus.trigger_hblank_dma();
-            }
         }
 
         let dispcnt = bus.read_u16(0x04000000);
-        if dispcnt != last_dispcnt {
-            println!(
-                "[frame {frame}] DISPCNT {:#06x}: mode={} forced_blank={} obj={} win0={} win1={} obj_win={} | bg0={} bg1={} bg2={} bg3={}",
-                dispcnt,
-                dispcnt & 0b111,     // bits 2:0 — display mode
-                (dispcnt >> 7) & 1,  // bit 7  — forced blank (white screen)
-                (dispcnt >> 12) & 1, // bit 12 — OBJ/sprite layer enabled
-                (dispcnt >> 13) & 1, // bit 13 — window 0 enable
-                (dispcnt >> 14) & 1, // bit 14 — window 1 enable
-                (dispcnt >> 15) & 1, // bit 15 — OBJ window enable
-                (dispcnt >> 8) & 1,  // bit 8  — BG0
-                (dispcnt >> 9) & 1,  // bit 9  — BG1
-                (dispcnt >> 10) & 1, // bit 10 — BG2
-                (dispcnt >> 11) & 1, // bit 11 — BG3
-            );
-            last_dispcnt = dispcnt;
-        }
+        // if dispcnt != last_dispcnt {
+        //     println!(
+        //         "[frame {frame}] DISPCNT {:#06x}: mode={} forced_blank={} obj={} win0={} win1={} obj_win={} | bg0={} bg1={} bg2={} bg3={}",
+        //         dispcnt,
+        //         dispcnt & 0b111,     // bits 2:0 — display mode
+        //         (dispcnt >> 7) & 1,  // bit 7  — forced blank (white screen)
+        //         (dispcnt >> 12) & 1, // bit 12 — OBJ/sprite layer enabled
+        //         (dispcnt >> 13) & 1, // bit 13 — window 0 enable
+        //         (dispcnt >> 14) & 1, // bit 14 — window 1 enable
+        //         (dispcnt >> 15) & 1, // bit 15 — OBJ window enable
+        //         (dispcnt >> 8) & 1,  // bit 8  — BG0
+        //         (dispcnt >> 9) & 1,  // bit 9  — BG1
+        //         (dispcnt >> 10) & 1, // bit 10 — BG2
+        //         (dispcnt >> 11) & 1, // bit 11 — BG3
+        //     );
+        //     last_dispcnt = dispcnt;
+        // }
 
         if frame % 600 == 0 {
             println!(

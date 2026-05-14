@@ -43,6 +43,7 @@ impl PPU {
         bus.io[4] |= 0x02; //set DISPSTAT hblank bit
         bus.trigger_hblank_dma(); //hblank dma triggered every visible line
 
+        self.mode = PpuMode::HBlank;
         //optional addition: triggert stat hblank irq
     }
 
@@ -57,7 +58,7 @@ impl PPU {
         self.update_vcount_register(bus);
 
         if self.vcount == 160 {
-            bus.io[4] |= 0x02;
+            bus.io[4] |= 0x01;
             self.mode = PpuMode::Vblank;
             bus.trigger_vblank_dma();
         }
@@ -99,10 +100,12 @@ impl PPU {
             (((bd >> 5) & 0x1F) as u8) << 3,
             (((bd >> 10) & 0x1F) as u8) << 3,
         );
+        let base = line * 240 * 3;
         for i in 0..240usize {
-            self.framebuffer[i * 3] = bd_r;
-            self.framebuffer[i * 3 + 1] = bd_g;
-            self.framebuffer[i * 3 + 2] = bd_b;
+            let fb_idx = base + i * 3;
+            self.framebuffer[fb_idx] = bd_r;
+            self.framebuffer[fb_idx + 1] = bd_g;
+            self.framebuffer[fb_idx + 2] = bd_b;
         }
 
         //render BG3 → BG0 (low priority first, high priority on top)
