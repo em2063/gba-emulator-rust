@@ -632,6 +632,49 @@ impl CPU {
             bus.write_u16(0x04000208, 1); // enable IME
             return;
         }
+        if swi_num == 0x00 {
+            // SoftReset: read POSTFLG, clear it, restore stacks, jump to ROM or multiboot
+            let postflg = bus.read_u8(0x04000300);
+            println!("[SWI #0x00 SoftReset] POSTFLG={postflg} — jumping to {}", if postflg == 1 { "ROM 0x08000000" } else { "multiboot 0x02000000" });
+            bus.write_u8(0x04000300, 0);
+            self.switch_mode(0x1F);
+            self.registers[13] = 0x03007F00;
+            self.r13_irq = 0x03007FA0;
+            self.r13_svc = 0x03007FE0;
+            self.cpsr = 0x0000001F;
+            self.registers[15] = if postflg == 1 { 0x08000000 } else { 0x02000000 };
+            return;
+        }
+        if swi_num == 0x01 {
+            // RegisterRamReset: R0 = reset flags. Zero out key IO/palette/OAM as requested.
+            let flags = self.registers[0];
+            println!("[SWI #0x01 RegisterRamReset] flags={flags:#010x}");
+            if flags & (1 << 2) != 0 { bus.palette.fill(0); }
+            if flags & (1 << 4) != 0 { bus.oam.fill(0); }
+            if flags & (1 << 7) != 0 {
+                // Reset all IO except POSTFLG/HALTCNT
+                let postflg = bus.io[0x300];
+                bus.io[..0x200].fill(0);
+                bus.io[0x300] = postflg;
+            }
+            return;
+        }
+        static BITUNPACK_CALLS: std::sync::atomic::AtomicU32 =
+            std::sync::atomic::AtomicU32::new(0);
+        if swi_num == 0x0b {
+            let n = BITUNPACK_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if n < 8 {
+                println!(
+                    "[BitUnPack #{n}] R0={:#010x} R1={:#010x} R2={:#010x} R3={:#010x} | R4={:#010x} R5={:#010x} R6={:#010x} R7={:#010x}",
+                    self.registers[0], self.registers[1], self.registers[2], self.registers[3],
+                    self.registers[4], self.registers[5], self.registers[6], self.registers[7],
+                );
+            } else if n % 10000 == 0 {
+                println!("[BitUnPack] call #{n}, R0={:#010x} R1={:#010x}", self.registers[0], self.registers[1]);
+            }
+        } else {
+            println!("[SWI Thumb] #{:#04x} at PC={:#010x}", swi_num, self.registers[15].wrapping_sub(2));
+        }
 
         let saved_cpsr = self.cpsr; // must save before switch_mode modifies CPSR
         self.switch_mode(0b10011);

@@ -10,7 +10,7 @@ use sdl2::keyboard::Keycode;
 use sdl2::pixels::PixelFormatEnum;
 
 fn main() {
-    let rom: Vec<u8> = std::fs::read("tests/ppu/octtest.gba").unwrap();
+    let rom: Vec<u8> = std::fs::read("roms/pokemon.gba").unwrap();
     let mut bus = memory_bus::MemoryBus::new(rom); //mem bus setup
 
     //setup gba bios
@@ -21,9 +21,22 @@ fn main() {
     let mut cpu = cpu::CPU::new();
     let mut ppu = ppu::PPU::new();
 
-    //start PC at 0 and CPSR in supervisor mode
-    cpu.registers[15] = 0x00000000;
-    cpu.cpsr = 0x000000D3;
+    //BIOS skip: set post-BIOS CPU state and jump straight to ROM.
+    //The BIOS binary is still loaded so SWI calls that fall through work,
+    //but we don't execute the BIOS reset/logo sequence.
+    //Set to false to run the full BIOS from 0x00000000.
+    const SKIP_BIOS: bool = true;
+    if SKIP_BIOS {
+        cpu.registers[15] = 0x08000000; // ROM entry
+        cpu.cpsr = 0x0000001F; // System mode, ARM, IRQ/FIQ enabled
+        cpu.registers[13] = 0x03007F00; // User/System SP (BIOS initialises this)
+        cpu.r13_irq = 0x03007FA0; // IRQ SP
+        cpu.r13_svc = 0x03007FE0; // SVC SP
+        bus.io[0x300] = 1; // POSTFLG — tells ROM the BIOS has already run
+    } else {
+        cpu.registers[15] = 0x00000000;
+        cpu.cpsr = 0x000000D3; // SVC mode, IRQ/FIQ disabled
+    }
 
     //SDL2 setup
     let sdl_context = sdl2::init().unwrap();
@@ -59,7 +72,7 @@ fn main() {
 
         let mut last_mirror = 0u32;
         for _cycle in 0..280896u32 {
-            ppu.tick(&mut bus);
+            ppu.tick(&mut cpu, &mut bus);
 
             cpu.registers[15] = match cpu.registers[15] >> 24 {
                 0x09 => cpu.registers[15] - 0x01000000,
@@ -124,23 +137,23 @@ fn main() {
         }
 
         let dispcnt = bus.read_u16(0x04000000);
-        // if dispcnt != last_dispcnt {
-        //     println!(
-        //         "[frame {frame}] DISPCNT {:#06x}: mode={} forced_blank={} obj={} win0={} win1={} obj_win={} | bg0={} bg1={} bg2={} bg3={}",
-        //         dispcnt,
-        //         dispcnt & 0b111,     // bits 2:0 — display mode
-        //         (dispcnt >> 7) & 1,  // bit 7  — forced blank (white screen)
-        //         (dispcnt >> 12) & 1, // bit 12 — OBJ/sprite layer enabled
-        //         (dispcnt >> 13) & 1, // bit 13 — window 0 enable
-        //         (dispcnt >> 14) & 1, // bit 14 — window 1 enable
-        //         (dispcnt >> 15) & 1, // bit 15 — OBJ window enable
-        //         (dispcnt >> 8) & 1,  // bit 8  — BG0
-        //         (dispcnt >> 9) & 1,  // bit 9  — BG1
-        //         (dispcnt >> 10) & 1, // bit 10 — BG2
-        //         (dispcnt >> 11) & 1, // bit 11 — BG3
-        //     );
-        //     last_dispcnt = dispcnt;
-        // }
+        if dispcnt != last_dispcnt {
+            println!(
+                "[frame {frame}] DISPCNT {:#06x}: mode={} forced_blank={} obj={} win0={} win1={} obj_win={} | bg0={} bg1={} bg2={} bg3={}",
+                dispcnt,
+                dispcnt & 0b111,     // bits 2:0 — display mode
+                (dispcnt >> 7) & 1,  // bit 7  — forced blank (white screen)
+                (dispcnt >> 12) & 1, // bit 12 — OBJ/sprite layer enabled
+                (dispcnt >> 13) & 1, // bit 13 — window 0 enable
+                (dispcnt >> 14) & 1, // bit 14 — window 1 enable
+                (dispcnt >> 15) & 1, // bit 15 — OBJ window enable
+                (dispcnt >> 8) & 1,  // bit 8  — BG0
+                (dispcnt >> 9) & 1,  // bit 9  — BG1
+                (dispcnt >> 10) & 1, // bit 10 — BG2
+                (dispcnt >> 11) & 1, // bit 11 — BG3
+            );
+            last_dispcnt = dispcnt;
+        }
 
         if frame % 600 == 0 {
             println!(
@@ -150,8 +163,6 @@ fn main() {
         }
 
         frame += 1;
-
-        ppu.render_sprites(&bus.oam, &bus.palette, &bus.vram, dispcnt);
 
         texture.update(None, &ppu.framebuffer, 240 * 3).unwrap();
         canvas.copy(&texture, None, None).unwrap();

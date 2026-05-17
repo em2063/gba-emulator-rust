@@ -38,10 +38,14 @@ impl MemoryBus {
             0x03000000..=0x03FFFFFF => self.iwram[((addr - 0x03000000) & 0x7FFF) as usize],
             0x04000000..=0x040003FE => {
                 if addr == 0x04000004 {
-                    //DISPSTAT low byte: bit 0 = VBlank (VCOUNT >= 160)
+                    let mut val = self.io[4];
                     let vcount = self.io[6] as u16;
-                    let vblank = if vcount >= 160 { 1u8 } else { 0u8 };
-                    return vblank;
+                    if vcount >= 160 {
+                        val |= 0x01;
+                    } else {
+                        val &= !0x01;
+                    }
+                    return val;
                 }
                 self.io[(addr - 0x04000000) as usize]
             }
@@ -119,7 +123,14 @@ impl MemoryBus {
             0x00000000..=0x00003FFF => self.bios[addr as usize] = value,
             0x02000000..=0x02FFFFFF => self.ewram[((addr - 0x02000000) & 0x3FFFF) as usize] = value,
             0x03000000..=0x03FFFFFF => self.iwram[((addr - 0x03000000) & 0x7FFF) as usize] = value,
-            0x04000000..=0x040003FE => self.io[(addr - 0x04000000) as usize] = value,
+            0x04000000..=0x040003FE => {
+                let off = (addr - 0x04000000) as usize;
+                if off == 0x04 {
+                    self.io[off] = (value & 0xF8) | (self.io[off] & 0x07);
+                } else {
+                    self.io[off] = value;
+                }
+            }
             0x05000000..=0x050003FF => self.palette[(addr - 0x05000000) as usize] = value,
             0x06000000..=0x06017FFF => {
                 self.vram[(addr - 0x06000000) as usize] = value;

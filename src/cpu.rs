@@ -118,7 +118,12 @@ impl CPU {
             _ => {
                 let bits_27_25 = (instruction >> 25) & 0b111;
                 match bits_27_25 {
-                    0b110 | 0b111 => {}
+                    0b110 | 0b111 => {
+                        println!(
+                            "[UNIMPL] coprocessor/undefined {:#034b} at PC={:#010x}",
+                            instruction, self.registers[15]
+                        );
+                    }
                     0b010 | 0b011 => self.execute_ldr_str(bus, instruction),
                     0b000 | 0b001 => {
                         if (instruction >> 8) & 0xFFFFF == 0b00010010111111111111 {
@@ -584,12 +589,6 @@ impl CPU {
 
     //switches between banked registers and system registers, used for exceptions and SWI
     pub fn switch_mode(&mut self, new_mode: u32) {
-        if new_mode == 0b10010 {
-            println!(
-                "Switching to IRQ mode from PC={:#010x} CPSR={:#010x}",
-                self.registers[15], self.cpsr
-            );
-        }
         match self.cpsr & 0x1F {
             //user
             0b11111 | 0b10000 => {
@@ -675,6 +674,7 @@ impl CPU {
             bus.write_u16(0x04000208, 1); // enable IME
             return; // don't jump to BIOS
         }
+        println!("[SWI ARM] #{:#04x} at PC={:#010x}", swi_num, self.registers[15].wrapping_sub(4));
 
         let saved_cpsr = self.cpsr; // must save before switch_mode modifies CPSR
         self.switch_mode(0b10011);
@@ -688,7 +688,7 @@ impl CPU {
     }
 
     pub fn trigger_irq(&mut self, bus: &mut MemoryBus) {
-        let return_addr = self.registers[15];
+        let return_addr = self.registers[15].wrapping_add(4);
         let saved_cpsr = self.cpsr;
 
         self.switch_mode(0b10010);
@@ -944,13 +944,6 @@ impl CPU {
 
         if dest_register == 15 && (instruction >> 20) & 1 == 1 {
             let spsr = self.get_spsr();
-            println!(
-                "SUBS PC: LR={:#010x} -> PC={:#010x}, SPSR={:#010x} (restoring mode {:#04x})",
-                rn,
-                rn.wrapping_sub(op2),
-                spsr,
-                spsr & 0x1F
-            );
             self.switch_mode(spsr & 0x1F);
             self.cpsr = spsr;
         } else if (instruction >> 20) & 1 == 1 {
