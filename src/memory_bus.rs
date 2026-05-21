@@ -3,8 +3,8 @@ use crate::timer::Timer;
 pub struct MemoryBus {
     pub rom: Vec<u8>,
     pub bios: [u8; 16 * 1024], //system rom
-    ewram: [u8; 256 * 1024],   //on-board work RAM
-    iwram: [u8; 32 * 1024],    //on-chip work RAM
+    pub ewram: [u8; 256 * 1024],
+    pub iwram: [u8; 32 * 1024],
     pub io: [u8; 0x400],       //input/output - 0 for now
     pub palette: [u8; 1024],   //pallete
     pub vram: [u8; 96 * 1024], //virtual ram
@@ -96,7 +96,9 @@ impl MemoryBus {
 
     pub fn write_u8(&mut self, addr: u32, value: u8) {
         match addr {
-            0x00000000..=0x00003FFF => self.bios[addr as usize] = value,
+            0x00000000..=0x00003FFF => {
+                // BIOS is read-only on real hardware; ignore writes.
+            }
             0x02000000..=0x02FFFFFF => self.ewram[((addr - 0x02000000) & 0x3FFFF) as usize] = value,
             0x03000000..=0x03FFFFFF => self.iwram[((addr - 0x03000000) & 0x7FFF) as usize] = value,
             0x04000000..=0x040003FE => self.io[(addr - 0x04000000) as usize] = value,
@@ -120,7 +122,10 @@ impl MemoryBus {
 
     fn write_u8_internal(&mut self, addr: u32, value: u8) {
         match addr {
-            0x00000000..=0x00003FFF => self.bios[addr as usize] = value,
+            0x00000000..=0x00003FFF => {
+                // BIOS is read-only; ignore writes.
+                let _ = value;
+            }
             0x02000000..=0x02FFFFFF => self.ewram[((addr - 0x02000000) & 0x3FFFF) as usize] = value,
             0x03000000..=0x03FFFFFF => self.iwram[((addr - 0x03000000) & 0x7FFF) as usize] = value,
             0x04000000..=0x040003FE => {

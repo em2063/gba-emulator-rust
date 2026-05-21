@@ -10,7 +10,7 @@ use sdl2::keyboard::Keycode;
 use sdl2::pixels::PixelFormatEnum;
 
 fn main() {
-    let rom: Vec<u8> = std::fs::read("roms/pokemon.gba").unwrap();
+    let rom: Vec<u8> = std::fs::read("roms/castlevania.gba").unwrap();
     let mut bus = memory_bus::MemoryBus::new(rom); //mem bus setup
 
     //setup gba bios
@@ -23,7 +23,6 @@ fn main() {
 
     //BIOS skip: set post-BIOS CPU state and jump straight to ROM.
     //The BIOS binary is still loaded so SWI calls that fall through work,
-    //but we don't execute the BIOS reset/logo sequence.
     //Set to false to run the full BIOS from 0x00000000.
     const SKIP_BIOS: bool = true;
     if SKIP_BIOS {
@@ -70,16 +69,8 @@ fn main() {
             }
         }
 
-        let mut last_mirror = 0u32;
         for _cycle in 0..280896u32 {
             ppu.tick(&mut cpu, &mut bus);
-
-            cpu.registers[15] = match cpu.registers[15] >> 24 {
-                0x09 => cpu.registers[15] - 0x01000000,
-                0x0A | 0x0B => cpu.registers[15] - 0x02000000,
-                0x0C | 0x0D => cpu.registers[15] - 0x04000000,
-                _ => cpu.registers[15],
-            };
 
             let pc = cpu.registers[15];
 
@@ -97,11 +88,6 @@ fn main() {
                 let instruction = bus.read_u32(pc);
                 cpu.registers[15] = pc.wrapping_add(4);
                 cpu.execute_instruction(&mut bus, instruction);
-            }
-
-            let mirror = cpu.registers[15] >> 24;
-            if mirror != last_mirror && mirror >= 8 {
-                last_mirror = mirror;
             }
 
             for i in 0..4 {

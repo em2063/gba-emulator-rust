@@ -1,16 +1,11 @@
 use crate::memory_bus::MemoryBus;
 
-//struct to hold 16 registers: 0-12 general purpose, 13 stack pointer,
-//14 link register, 15 program counter
-//CPSR flags stored as a single 32-bit
-//SPSR flags stored as 32-bit
-//banked registers for each mode (required for exceptions)
+// 16 general registers (R15 = PC, R14 = LR, R13 = SP), CPSR, and per-mode
+// banked R13/R14/SPSR. FIQ also banks R8-R12.
 pub struct CPU {
     pub registers: [u32; 16],
     pub cpsr: u32,
-    pub spsr: u32,
 
-    //banked R13/R14 for each mode
     pub r13_svc: u32,
     pub r14_svc: u32,
     pub spsr_svc: u32,
@@ -29,7 +24,6 @@ pub struct CPU {
     pub r13_usr: u32,
     pub r14_usr: u32,
 
-    // FIQ also banks R8-R12
     pub r8_fiq: u32,
     pub r9_fiq: u32,
     pub r10_fiq: u32,
@@ -38,14 +32,10 @@ pub struct CPU {
 }
 
 impl CPU {
-    //init cpu instance
     pub fn new() -> CPU {
         CPU {
             registers: [0; 16],
             cpsr: 0,
-            spsr: 0,
-
-            //banked R13/R14 for each mode
             r13_svc: 0,
             r14_svc: 0,
             spsr_svc: 0,
@@ -63,8 +53,6 @@ impl CPU {
             spsr_fiq: 0,
             r13_usr: 0,
             r14_usr: 0,
-
-            // FIQ also banks R8-R12
             r8_fiq: 0,
             r9_fiq: 0,
             r10_fiq: 0,
@@ -96,7 +84,7 @@ impl CPU {
             0b1101 => z || (n != v),
             0b1110 => true,
             0b1111 => false,
-            _ => todo!(),
+            _ => unreachable!(),
         }
     }
 
@@ -119,16 +107,14 @@ impl CPU {
                 let bits_27_25 = (instruction >> 25) & 0b111;
                 match bits_27_25 {
                     0b110 | 0b111 => {
-                        println!(
-                            "[UNIMPL] coprocessor/undefined {:#034b} at PC={:#010x}",
-                            instruction, self.registers[15]
-                        );
+                        self.trigger_undefined();
                     }
                     0b010 | 0b011 => self.execute_ldr_str(bus, instruction),
                     0b000 | 0b001 => {
                         if (instruction >> 8) & 0xFFFFF == 0b00010010111111111111 {
                             self.decode_branch_exchange(instruction);
-                        } else if (instruction >> 4) & 1 == 1
+                        } else if (instruction >> 25) & 1 == 0  // bit 25 MUST be 0 for halfword transfer
+                            && (instruction >> 4) & 1 == 1
                             && (instruction >> 7) & 1 == 1
                             && (instruction >> 5) & 0b11 != 0
                         {
@@ -148,12 +134,7 @@ impl CPU {
                     }
                     0b101 => self.decode_branch(instruction),
                     0b100 => self.decode_memory(bus, instruction),
-                    _ => {
-                        println!(
-                            "unimplemented instruction: {:#034b} at PC: {:#010x}",
-                            instruction, self.registers[15]
-                        );
-                    }
+                    _ => self.halt("unimplemented ARM instruction group", instruction),
                 }
             }
         }
@@ -166,8 +147,13 @@ impl CPU {
         let rlist = instruction & 0xFFFF;
         let p = (instruction >> 24) & 1; // pre-index
         let u = (instruction >> 23) & 1; // up (1) or down (0)
+        let s = (instruction >> 22) & 1; // S bit: exception return / user-bank
         let write_back = (instruction >> 21) & 1;
         let load = (instruction >> 20) & 1;
+
+        let pc_in_list = (rlist >> 15) & 1 == 1;
+        // LDM with S=1 and PC in list -> exception return: restore CPSR from SPSR after PC load.
+        let exception_return = load == 1 && s == 1 && pc_in_list;
 
         //ARM always stores the lowest-numbered register at the lowest address.
         //compute the lowest address, then walk upward through the list.
@@ -189,11 +175,27 @@ impl CPU {
                 if load == 1 {
                     let value = bus.read_u32(address);
                     if i == 15 {
-                        self.registers[15] = value & !1;
-                        if value & 1 == 1 {
-                            self.cpsr |= 1 << 5;
+                        if exception_return {
+                            // Restore CPSR from SPSR before writing PC, then preserve
+                            // whatever T bit the SPSR specified (don't strip from value).
+                            let spsr = self.get_spsr();
+                            self.switch_mode(spsr & 0x1F);
+                            self.cpsr = spsr;
+                            // In ARM mode, PC must be 4-aligned; in Thumb, 2-aligned.
+                            let mask = if (self.cpsr >> 5) & 1 == 1 {
+                                !1u32
+                            } else {
+                                !3u32
+                            };
+                            self.registers[15] = value & mask;
                         } else {
-                            self.cpsr &= !(1 << 5);
+                            // Plain LDM with PC: BX-style mode switch via bit 0
+                            self.registers[15] = value & !1;
+                            if value & 1 == 1 {
+                                self.cpsr |= 1 << 5;
+                            } else {
+                                self.cpsr &= !(1 << 5);
+                            }
                         }
                     } else {
                         self.registers[i] = value;
@@ -298,7 +300,7 @@ impl CPU {
                     0b1 => rm >> shift,
                     0b10 => ((rm as i32) >> shift) as u32,
                     0b11 => rm.rotate_right(shift),
-                    _ => todo!(),
+                    _ => unreachable!(),
                 };
             } else {
                 let register = self.registers[((instruction >> 8) & 0xF) as usize];
@@ -312,7 +314,7 @@ impl CPU {
                     0b1 => rm.wrapping_shr(shift),
                     0b10 => ((rm as i32).wrapping_shr(shift)) as u32,
                     0b11 => rm.rotate_right(shift),
-                    _ => todo!(),
+                    _ => unreachable!(),
                 };
             }
         }
@@ -327,21 +329,21 @@ impl CPU {
 
         let rn = self.read_register(base_idx as u32);
 
-        // Step 1: compute offset address (but DON'T apply post yet)
+        //Step 1: compute offset address (but DON'T apply post yet)
         let offset_addr = if u == 1 {
             rn.wrapping_add(offset)
         } else {
             rn.wrapping_sub(offset)
         };
 
-        // Step 2: choose address depending on P
+        //Step 2: choose address depending on P
         let address = if p == 1 {
             offset_addr // pre-indexed
         } else {
             rn // post-indexed uses original rn
         };
 
-        // Step 3: perform memory access
+        //Step 3: perform memory access
         if l == 1 {
             // LDR
             if b == 1 {
@@ -400,13 +402,13 @@ impl CPU {
             0x3 => self.execute_rsb(instruction),
             0x7 => self.execute_rsc(instruction),
             0xB => self.execute_cmn(instruction),
-            _ => {
-                println!(
-                    "unimplemented ALU opcode: {:#06b}",
+            _ => self.halt(
+                &format!(
+                    "unimplemented ALU opcode {:#06b}",
                     (instruction >> 21) & 0xF
-                );
-                todo!()
-            }
+                ),
+                instruction,
+            ),
         }
     }
 
@@ -498,10 +500,7 @@ impl CPU {
                     self.set_flags(n, z, c, v);
                 }
             }
-            _ => {
-                print!("Unimplemented MUL instruction: {:#034b}\n", instruction);
-                todo!()
-            }
+            _ => self.halt("unimplemented MUL variant", instruction),
         }
     }
 
@@ -579,12 +578,40 @@ impl CPU {
                 }
                 self.registers[15] = target & !1;
             }
-            0b0011 => {
-                print!("BLX - todo\n");
-                todo!();
-            }
-            _ => todo!(),
+            0b0011 => self.halt("unimplemented BLX", instruction),
+            _ => self.halt("unimplemented branch/exchange variant", instruction),
         }
+    }
+
+    pub fn halt(&self, context: &str, instruction: u32) -> ! {
+        eprintln!("\n=== EMULATOR HALT ===");
+        eprintln!("  reason : {}", context);
+        eprintln!("  instr  : {:#010x}  ({:#034b})", instruction, instruction);
+        eprintln!(
+            "  PC     : {:#010x}  (before fetch: {:#010x})",
+            self.registers[15],
+            self.registers[15].wrapping_sub(4)
+        );
+        eprintln!(
+            "  CPSR   : {:#010x}  mode={:#07b}  T={}  N={}  Z={}  C={}  V={}",
+            self.cpsr,
+            self.cpsr & 0x1F,
+            (self.cpsr >> 5) & 1,
+            (self.cpsr >> 31) & 1,
+            (self.cpsr >> 30) & 1,
+            (self.cpsr >> 29) & 1,
+            (self.cpsr >> 28) & 1,
+        );
+        for row in 0..4 {
+            eprint!("  ");
+            for col in 0..4 {
+                let i = row * 4 + col;
+                eprint!("r{:<2}={:#010x}  ", i, self.registers[i]);
+            }
+            eprintln!();
+        }
+        eprintln!("=====================\n");
+        panic!("halted");
     }
 
     //switches between banked registers and system registers, used for exceptions and SWI
@@ -668,26 +695,34 @@ impl CPU {
         self.cpsr = (self.cpsr & !0x1F) | new_mode;
     }
 
-    pub fn execute_swi(&mut self, bus: &mut MemoryBus, instruction: u32) {
-        let swi_num = (instruction >> 16) & 0xFF;
-        if swi_num == 0x05 {
-            bus.write_u16(0x04000208, 1); // enable IME
-            return; // don't jump to BIOS
-        }
-        println!("[SWI ARM] #{:#04x} at PC={:#010x}", swi_num, self.registers[15].wrapping_sub(4));
-
-        let saved_cpsr = self.cpsr; // must save before switch_mode modifies CPSR
+    // ARM SWI: enter SVC mode and dispatch to the real BIOS handler at 0x00000008.
+    // The BIOS reads the SWI instruction at LR_svc-4 to determine which call to run.
+    pub fn execute_swi(&mut self, _bus: &mut MemoryBus, _instruction: u32) {
+        let saved_cpsr = self.cpsr; // capture BEFORE switch_mode modifies cpsr
         self.switch_mode(0b10011);
-        // registers[15] is already pc+4 (incremented before dispatch in main.rs)
-        self.registers[14] = self.registers[15];
+        self.registers[14] = self.registers[15]; // registers[15] is already pc+4
         self.r14_svc = self.registers[15];
         self.spsr_svc = saved_cpsr;
-        self.cpsr = (self.cpsr & !0x3F) | 0x13 | (1 << 7);
+        self.cpsr = (self.cpsr & !0x3F) | 0x13 | (1 << 7); // SVC mode, IRQ disabled
         self.cpsr &= !(1 << 5); // ARM mode
         self.registers[15] = 0x00000008;
     }
 
-    pub fn trigger_irq(&mut self, bus: &mut MemoryBus) {
+    pub fn trigger_undefined(&mut self) {
+        let saved_cpsr = self.cpsr;
+        self.switch_mode(0b11011); // UND mode
+        self.registers[14] = self.registers[15]; // PC is already past the instruction
+        self.r14_und = self.registers[14];
+        self.spsr_und = saved_cpsr;
+        self.cpsr = (self.cpsr & !0x3F) | 0x1B | (1 << 7); // UND mode, IRQ disabled, ARM
+        self.cpsr &= !(1 << 5);
+        self.registers[15] = 0x00000004; // undefined instruction vector
+    }
+
+    pub fn trigger_irq(&mut self, _bus: &mut MemoryBus) {
+        // BIOS IRQ handler returns via `SUBS PC, LR, #4`. registers[15] is the next
+        // instruction address (already incremented before dispatch), so LR must be
+        // next_instr + 4 so that LR - 4 lands at next_instr.
         let return_addr = self.registers[15].wrapping_add(4);
         let saved_cpsr = self.cpsr;
 
@@ -925,8 +960,16 @@ impl CPU {
     fn execute_add(&mut self, instruction: u32) {
         let dest_register = (instruction >> 12) & 0xF;
         let rn = self.read_register((instruction >> 16) & 0xF);
-        let (op2, carry) = self.decode_op2(instruction);
+        let (op2, _carry) = self.decode_op2(instruction);
         self.registers[dest_register as usize] = rn.wrapping_add(op2);
+
+        // ADDS PC, ... — exception return: restore CPSR from SPSR
+        if dest_register == 15 && (instruction >> 20) & 1 == 1 {
+            let spsr = self.get_spsr();
+            self.switch_mode(spsr & 0x1F);
+            self.cpsr = spsr;
+            return;
+        }
 
         if (instruction >> 20) & 1 == 1 {
             let (n, z, c, v) = self.add_flags(rn, op2);
@@ -939,8 +982,17 @@ impl CPU {
         let dest_register = (instruction >> 12) & 0xF;
         let rn = self.read_register((instruction >> 16) & 0xF);
 
-        let (op2, carry) = self.decode_op2(instruction);
-        self.registers[dest_register as usize] = rn.wrapping_sub(op2);
+        let (op2, _carry) = self.decode_op2(instruction);
+        let result = rn.wrapping_sub(op2);
+        self.registers[dest_register as usize] = result;
+
+        // SUBS PC, ... — exception return: restore CPSR from SPSR
+        if dest_register == 15 && (instruction >> 20) & 1 == 1 {
+            let spsr = self.get_spsr();
+            self.switch_mode(spsr & 0x1F);
+            self.cpsr = spsr;
+            return;
+        }
 
         if dest_register == 15 && (instruction >> 20) & 1 == 1 {
             let spsr = self.get_spsr();
@@ -955,14 +1007,14 @@ impl CPU {
     //CMP rn, op2
     fn execute_cmp(&mut self, instruction: u32) {
         let rn = self.read_register((instruction >> 16) & 0xF);
-        let (op2, carry) = self.decode_op2(instruction);
+        let (op2, _carry) = self.decode_op2(instruction);
         let (n, z, c, v) = self.sub_flags(rn, op2);
         self.set_flags(n, z, c, v);
     }
 
     fn execute_cmn(&mut self, instruction: u32) {
         let rn = self.read_register((instruction >> 16) & 0xF);
-        let (op2, carry) = self.decode_op2(instruction);
+        let (op2, _carry) = self.decode_op2(instruction);
         let (n, z, c, v) = self.add_flags(rn, op2);
         self.set_flags(n, z, c, v);
     }
@@ -1039,7 +1091,7 @@ impl CPU {
     fn execute_adc(&mut self, instruction: u32) {
         let rn = self.read_register((instruction >> 16) & 0xF);
         let rd = (instruction >> 12) & 0xF;
-        let (op2, carry) = self.decode_op2(instruction);
+        let (op2, _carry) = self.decode_op2(instruction);
         let carry = (self.cpsr >> 29) & 1;
         self.registers[rd as usize] = rn.wrapping_add(op2).wrapping_add(carry);
 
@@ -1078,7 +1130,7 @@ impl CPU {
     fn execute_subc(&mut self, instruction: u32) {
         let rn = self.read_register((instruction >> 16) & 0xF);
         let rd = (instruction >> 12) & 0xF;
-        let (op2, carry) = self.decode_op2(instruction);
+        let (op2, _carry) = self.decode_op2(instruction);
         let carry = (self.cpsr >> 29) & 1;
         self.registers[rd as usize] = rn.wrapping_sub(op2).wrapping_add(carry).wrapping_sub(1);
 
@@ -1104,7 +1156,7 @@ impl CPU {
     fn execute_rsb(&mut self, instruction: u32) {
         let rd = (instruction >> 12) & 0xF;
         let rn = self.read_register((instruction >> 16) & 0xF);
-        let (op2, carry) = self.decode_op2(instruction);
+        let (op2, _carry) = self.decode_op2(instruction);
         let carry = (self.cpsr >> 29) & 1;
         let result = op2.wrapping_sub(rn);
         self.registers[rd as usize] = result;
@@ -1118,7 +1170,7 @@ impl CPU {
     fn execute_rsc(&mut self, instruction: u32) {
         let rn = self.read_register((instruction >> 16) & 0xF);
         let rd = (instruction >> 12) & 0xF;
-        let (op2, carry) = self.decode_op2(instruction);
+        let (op2, _carry) = self.decode_op2(instruction);
         let carry = (self.cpsr >> 29) & 1;
         self.registers[rd as usize] = op2.wrapping_sub(rn).wrapping_add(carry).wrapping_sub(1);
 

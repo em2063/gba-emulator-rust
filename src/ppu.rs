@@ -1,13 +1,8 @@
 use crate::cpu::CPU;
 use crate::memory_bus::MemoryBus;
 
-//Disable STAT IRQs until the IRQ dispatch chain (BIOS VBlankIntrWait) is proven stable.
-//Flip to true once the CPU's IRQ return path is fully debugged.
-const STAT_IRQS_ENABLED: bool = false;
-
 pub enum PpuMode {
     Oam,
-    Drawing,
     HBlank,
     Vblank,
 }
@@ -86,12 +81,10 @@ impl PPU {
 
         self.mode = PpuMode::HBlank;
 
-        //STAT HBlank IRQ — gated until IRQ dispatch chain is stable
-        if STAT_IRQS_ENABLED {
-            let dispstat = bus.read_u16(0x04000004);
-            if (dispstat >> 4) & 1 == 1 {
-                self.fire_irq(cpu, bus, 1);
-            }
+        // HBlank IRQ — gated on DISPSTAT bit 4 (HBlank IRQ Enable)
+        let dispstat = bus.read_u16(0x04000004);
+        if (dispstat >> 4) & 1 == 1 {
+            self.fire_irq(cpu, bus, 1);
         }
     }
 
@@ -116,12 +109,10 @@ impl PPU {
             let intrflag = bus.read_u16(0x03007FF8);
             bus.write_u16(0x03007FF8, (intrflag | 1) as u32);
 
-            //STAT VBlank IRQ — gated until IRQ dispatch chain is stable
-            if STAT_IRQS_ENABLED {
-                let dispstat = bus.read_u16(0x04000004);
-                if (dispstat >> 3) & 1 == 1 {
-                    self.fire_irq(cpu, bus, 0);
-                }
+            // VBlank IRQ — gated on DISPSTAT bit 3 (V-Blank IRQ Enable)
+            let dispstat = bus.read_u16(0x04000004);
+            if (dispstat >> 3) & 1 == 1 {
+                self.fire_irq(cpu, bus, 0);
             }
         }
 
@@ -176,22 +167,15 @@ impl PPU {
         let compare_val = bus.io[5];
         if self.vcount as u8 == compare_val {
             bus.io[4] |= 0x04;
-            //STAT VCount-match IRQ — gated until IRQ dispatch chain is stable
-            if STAT_IRQS_ENABLED {
-                let dispstat = bus.read_u16(0x04000004);
-                if (dispstat >> 5) & 1 == 1 {
-                    self.fire_irq(cpu, bus, 2);
-                }
+            // V-Counter match IRQ — gated on DISPSTAT bit 5
+            let dispstat = bus.read_u16(0x04000004);
+            if (dispstat >> 5) & 1 == 1 {
+                self.fire_irq(cpu, bus, 2);
             }
         } else {
             bus.io[4] &= !0x04;
         }
     }
-    //end of helper functions
-    //
-    //
-    //
-    //
 
     //main functions for rendering
     //mode 0-5 using scanline rendering

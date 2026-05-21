@@ -31,7 +31,7 @@ impl CPU {
                     0b1010 => self.execute_get_relative_address(instruction),
                     0b1001 => self.execute_ldr_str_sp_relative(bus, instruction),
                     0b0101 => {
-                        if ((instruction >> 9) & 1 == 0) {
+                        if (instruction >> 9) & 1 == 0 {
                             self.execute_ldr_str_with_register_offset(bus, instruction)
                         } else {
                             self.execute_ldr_str_sign_extended(bus, instruction);
@@ -57,12 +57,10 @@ impl CPU {
                                 match bits_15_10 {
                                     0b010000 => self.decode_thumb_alu(instruction),
                                     0b010001 => self.execute_hi_register_ops(instruction),
-                                    _ => {
-                                        println!(
-                                            "unimplemented instruction: {:#034b} at PC: {:#010x}",
-                                            instruction, self.registers[15]
-                                        )
-                                    }
+                                    _ => self.halt(
+                                        "unimplemented Thumb instruction group",
+                                        instruction as u32,
+                                    ),
                                 }
                             }
                         }
@@ -126,7 +124,7 @@ impl CPU {
                 let (n, z, c, v) = self.sub_flags(rsv, value_rn_nn as u32);
                 self.set_flags(n, z, c, v);
             }
-            _ => todo!(),
+            _ => unreachable!(),
         }
     }
 
@@ -162,7 +160,7 @@ impl CPU {
                 let (n, z, c, v) = self.sub_flags(rd_val, nn as u32);
                 self.set_flags(n, z, c, v);
             }
-            _ => todo!(),
+            _ => unreachable!(),
         }
     }
 
@@ -265,15 +263,11 @@ impl CPU {
             }
             //CMP
             0xA => {
-                let result = rd_val.wrapping_sub(rs_val);
-
                 let (n, z, c, v) = self.sub_flags(rd_val, rs_val);
                 self.set_flags(n, z, c, v);
             }
             //CMN
             0xB => {
-                let result = rd_val.wrapping_add(rs_val);
-
                 let (n, z, c, v) = self.add_flags(rd_val, rs_val);
                 self.set_flags(n, z, c, v);
             }
@@ -315,7 +309,7 @@ impl CPU {
                 let (n, z, c, v) = self.logical_flags(result as u32, cy);
                 self.set_flags(n, z, c, v);
             }
-            _ => todo!(),
+            _ => unreachable!(),
         }
     }
 
@@ -622,67 +616,19 @@ impl CPU {
                 self.registers[14] = temp;
                 self.cpsr &= !(1 << 5); //clear T flag — switch to ARM mode
             }
-            _ => todo!(),
+            _ => self.halt("unimplemented Thumb BL/BLX opcode", instruction as u32),
         }
     }
-    //swi
-    fn execute_swi_thumb(&mut self, bus: &mut MemoryBus, instruction: u16) {
-        let swi_num = instruction & 0xFF;
-        if swi_num == 0x05 {
-            bus.write_u16(0x04000208, 1); // enable IME
-            return;
-        }
-        if swi_num == 0x00 {
-            // SoftReset: read POSTFLG, clear it, restore stacks, jump to ROM or multiboot
-            let postflg = bus.read_u8(0x04000300);
-            println!("[SWI #0x00 SoftReset] POSTFLG={postflg} — jumping to {}", if postflg == 1 { "ROM 0x08000000" } else { "multiboot 0x02000000" });
-            bus.write_u8(0x04000300, 0);
-            self.switch_mode(0x1F);
-            self.registers[13] = 0x03007F00;
-            self.r13_irq = 0x03007FA0;
-            self.r13_svc = 0x03007FE0;
-            self.cpsr = 0x0000001F;
-            self.registers[15] = if postflg == 1 { 0x08000000 } else { 0x02000000 };
-            return;
-        }
-        if swi_num == 0x01 {
-            // RegisterRamReset: R0 = reset flags. Zero out key IO/palette/OAM as requested.
-            let flags = self.registers[0];
-            println!("[SWI #0x01 RegisterRamReset] flags={flags:#010x}");
-            if flags & (1 << 2) != 0 { bus.palette.fill(0); }
-            if flags & (1 << 4) != 0 { bus.oam.fill(0); }
-            if flags & (1 << 7) != 0 {
-                // Reset all IO except POSTFLG/HALTCNT
-                let postflg = bus.io[0x300];
-                bus.io[..0x200].fill(0);
-                bus.io[0x300] = postflg;
-            }
-            return;
-        }
-        static BITUNPACK_CALLS: std::sync::atomic::AtomicU32 =
-            std::sync::atomic::AtomicU32::new(0);
-        if swi_num == 0x0b {
-            let n = BITUNPACK_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if n < 8 {
-                println!(
-                    "[BitUnPack #{n}] R0={:#010x} R1={:#010x} R2={:#010x} R3={:#010x} | R4={:#010x} R5={:#010x} R6={:#010x} R7={:#010x}",
-                    self.registers[0], self.registers[1], self.registers[2], self.registers[3],
-                    self.registers[4], self.registers[5], self.registers[6], self.registers[7],
-                );
-            } else if n % 10000 == 0 {
-                println!("[BitUnPack] call #{n}, R0={:#010x} R1={:#010x}", self.registers[0], self.registers[1]);
-            }
-        } else {
-            println!("[SWI Thumb] #{:#04x} at PC={:#010x}", swi_num, self.registers[15].wrapping_sub(2));
-        }
-
-        let saved_cpsr = self.cpsr; // must save before switch_mode modifies CPSR
+    // Thumb SWI: enter SVC mode and dispatch to the real BIOS handler at 0x00000008.
+    // The BIOS binary is loaded so all SWIs (SoftReset, RegisterRamReset, CpuSet, etc.)
+    // are handled there. registers[15] is already pc+2 (incremented before dispatch).
+    fn execute_swi_thumb(&mut self, _bus: &mut MemoryBus, _instruction: u16) {
+        let saved_cpsr = self.cpsr; // capture BEFORE switch_mode modifies cpsr
         self.switch_mode(0b10011);
-        // registers[15] is already pc+2 (incremented before dispatch in main.rs)
         self.registers[14] = self.registers[15];
         self.r14_svc = self.registers[15];
         self.spsr_svc = saved_cpsr;
-        self.cpsr = (self.cpsr & !0x3F) | 0x13 | (1 << 7);
+        self.cpsr = (self.cpsr & !0x3F) | 0x13 | (1 << 7); // SVC mode, IRQ disabled
         self.cpsr &= !(1 << 5); // ARM mode
         self.registers[15] = 0x00000008;
     }
