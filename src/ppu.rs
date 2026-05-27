@@ -420,14 +420,24 @@ impl PPU {
                 }
                 let sx_u = screen_x as usize;
 
-                let tile_y = py / 8;
-                let tile_x = px / 8;
+                let tiles_wide = width / 8;
+                let tiles_tall = height / 8;
+
+                let tile_y = if v_flip {
+                    tiles_tall - 1 - (py / 8)
+                } else {
+                    py / 8
+                };
+                let tile_x = if h_flip {
+                    tiles_wide - 1 - (px / 8)
+                } else {
+                    px / 8
+                };
                 let pixel_x = if h_flip { 7 - (px % 8) } else { px % 8 };
                 let pixel_y = if v_flip { 7 - (py % 8) } else { py % 8 };
 
                 //tile_number indexes 32-byte slots in OBJ VRAM regardless of bpp.
                 //Each 8x8 tile is 32 bytes in 4bpp, 64 bytes in 8bpp (= 2 slots).
-                let tiles_wide = width / 8;
                 let tile_size = if colour_mode == 1 { 64 } else { 32 };
                 let stride = if mapping_1d {
                     tiles_wide
