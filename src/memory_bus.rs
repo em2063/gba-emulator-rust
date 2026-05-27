@@ -12,6 +12,7 @@ pub struct MemoryBus {
     sram: [u8; 64 * 1024],
     pub timers: [Timer; 4],
     dma_control: [u32; 4],
+    pub keyinput: u16, // 0x04000130
 }
 
 impl MemoryBus {
@@ -28,6 +29,7 @@ impl MemoryBus {
             sram: [0; 64 * 1024],
             timers: [Timer::new(), Timer::new(), Timer::new(), Timer::new()],
             dma_control: [0u32; 4],
+            keyinput: 0x03FF,
         }
     }
 
@@ -46,6 +48,8 @@ impl MemoryBus {
                         val &= !0x01;
                     }
                     return val;
+                } else if addr == 0x04000130 || addr == 0x04000131 {
+                    return self.keyinput as u8;
                 }
                 self.io[(addr - 0x04000000) as usize]
             }
@@ -152,6 +156,7 @@ impl MemoryBus {
             0x04000104 => self.timers[1].counter,
             0x04000108 => self.timers[2].counter,
             0x0400010C => self.timers[3].counter,
+
             _ => {
                 let b0 = self.read_u8(addr) as u16;
                 let b1 = self.read_u8(addr.wrapping_add(1)) as u16;
@@ -272,6 +277,15 @@ impl MemoryBus {
             let ctrl_io_addr = (0x040000BA + channel * 0xC) - 0x04000000;
             self.io[ctrl_io_addr + 1] &= !(1 << 7);
             self.dma_control[channel] = 0;
+        }
+    }
+
+    //handles bit change of 0/1 for when button is pressed
+    pub fn set_key(&mut self, bit: u8, pressed: bool) {
+        if pressed {
+            self.keyinput &= !(1 << bit);
+        } else {
+            self.keyinput |= 1 << bit;
         }
     }
 }

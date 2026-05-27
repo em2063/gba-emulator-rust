@@ -331,12 +331,9 @@ impl CPU {
                 self.set_flags(n, z, c, v);
             }
             2 => {
+                // Thumb MOV (hi reg form). On ARMv4T, writing PC does NOT switch
+                // T flag — that's BX's job. Just set PC, masking bit 0 for Thumb alignment.
                 if rd == 15 {
-                    if source_reg & 1 == 1 {
-                        self.cpsr |= 1 << 5;
-                    } else {
-                        self.cpsr &= !(1 << 5);
-                    }
                     self.registers[15] = source_reg & !1;
                 } else {
                     self.registers[rd as usize] = source_reg;

@@ -21,21 +21,9 @@ fn main() {
     let mut cpu = cpu::CPU::new();
     let mut ppu = ppu::PPU::new();
 
-    //BIOS skip: set post-BIOS CPU state and jump straight to ROM.
-    //The BIOS binary is still loaded so SWI calls that fall through work,
-    //Set to false to run the full BIOS from 0x00000000.
-    const SKIP_BIOS: bool = true;
-    if SKIP_BIOS {
-        cpu.registers[15] = 0x08000000; // ROM entry
-        cpu.cpsr = 0x0000001F; // System mode, ARM, IRQ/FIQ enabled
-        cpu.registers[13] = 0x03007F00; // User/System SP (BIOS initialises this)
-        cpu.r13_irq = 0x03007FA0; // IRQ SP
-        cpu.r13_svc = 0x03007FE0; // SVC SP
-        bus.io[0x300] = 1; // POSTFLG — tells ROM the BIOS has already run
-    } else {
-        cpu.registers[15] = 0x00000000;
-        cpu.cpsr = 0x000000D3; // SVC mode, IRQ/FIQ disabled
-    }
+    cpu.registers[15] = 0x00000000; //start PC from 0   
+    cpu.cpsr = 0x000000D3; // SVC mode, IRQ/FIQ disabled
+    bus.write_u16(0x04000130, 0x03FF); //set keyinput so all buttons are unpressed (1)
 
     //SDL2 setup
     let sdl_context = sdl2::init().unwrap();
@@ -60,11 +48,21 @@ fn main() {
         //handle events
         for event in event_pump.poll_iter() {
             match event {
-                Event::Quit { .. }
-                | Event::KeyDown {
-                    keycode: Some(Keycode::Escape),
-                    ..
-                } => break 'running,
+                Event::Quit { .. } => break 'running,
+                Event::KeyDown {
+                    keycode: Some(k), ..
+                } => {
+                    if let Some(b) = key_to_bit(k) {
+                        bus.set_key(b, true);
+                    }
+                }
+                Event::KeyUp {
+                    keycode: Some(k), ..
+                } => {
+                    if let Some(b) = key_to_bit(k) {
+                        bus.set_key(b, false);
+                    }
+                }
                 _ => {}
             }
         }
@@ -153,5 +151,21 @@ fn main() {
         texture.update(None, &ppu.framebuffer, 240 * 3).unwrap();
         canvas.copy(&texture, None, None).unwrap();
         canvas.present();
+    }
+}
+
+fn key_to_bit(k: Keycode) -> Option<u8> {
+    match k {
+        Keycode::O => Some(0),         //A
+        Keycode::P => Some(1),         //B
+        Keycode::Backspace => Some(2), //select
+        Keycode::Return => Some(3),    //start
+        Keycode::D => Some(4),         //right
+        Keycode::A => Some(5),         //left
+        Keycode::W => Some(6),         //up
+        Keycode::S => Some(7),         //down
+        Keycode::E => Some(8),         //right bumper
+        Keycode::Q => Some(9),         //left bumper
+        _ => None,
     }
 }
