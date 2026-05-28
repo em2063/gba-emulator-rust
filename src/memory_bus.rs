@@ -1,3 +1,4 @@
+use crate::flash::FlashState;
 use crate::timer::Timer;
 
 pub struct MemoryBus {
@@ -13,6 +14,7 @@ pub struct MemoryBus {
     pub timers: [Timer; 4],
     dma_control: [u32; 4],
     pub keyinput: u16, // 0x04000130
+    pub flash: FlashState,
 }
 
 impl MemoryBus {
@@ -30,6 +32,7 @@ impl MemoryBus {
             timers: [Timer::new(), Timer::new(), Timer::new(), Timer::new()],
             dma_control: [0u32; 4],
             keyinput: 0x03FF,
+            flash: FlashState::new(),
         }
     }
 
@@ -56,7 +59,7 @@ impl MemoryBus {
             0x05000000..=0x05FFFFFF => self.palette[((addr - 0x05000000) & 0x3FF) as usize],
             0x06000000..=0x06FFFFFF => self.vram[((addr - 0x06000000) & 0x17FFF) as usize],
             0x07000000..=0x07FFFFFF => self.oam[((addr - 0x07000000) & 0x3FF) as usize],
-            0x0E000000..=0x0E00FFFF => self.sram[(addr - 0x0E000000) as usize],
+            0x0E000000..=0x0E00FFFF => self.flash.read(addr),
             0x08000000..=0x09FFFFFF => {
                 let offset = ((addr - 0x08000000) as usize) % self.rom.len();
                 self.rom[offset]
@@ -118,7 +121,7 @@ impl MemoryBus {
                 self.vram[offset] = value;
                 self.vram[offset + 1] = value;
             }
-            0x0E000000..=0x0E00FFFF => self.sram[(addr - 0x0E000000) as usize] = value,
+            0x0E000000..=0x0E00FFFF => self.flash.write(addr, value),
             0x07000000..=0x07FFFFFF => {}
             _ => self.write_u8_internal(addr, value),
         };

@@ -1,4 +1,5 @@
 mod cpu;
+mod flash;
 mod memory_bus;
 mod ppu;
 mod thumb;
@@ -10,7 +11,7 @@ use sdl2::keyboard::Keycode;
 use sdl2::pixels::PixelFormatEnum;
 
 fn main() {
-    let rom: Vec<u8> = std::fs::read("roms/castlevania.gba").unwrap();
+    let rom: Vec<u8> = std::fs::read("roms/red-rescue-team.gba").unwrap();
     let mut bus = memory_bus::MemoryBus::new(rom); //mem bus setup
 
     //setup gba bios
@@ -22,7 +23,7 @@ fn main() {
     let mut ppu = ppu::PPU::new();
 
     cpu.registers[15] = 0x00000000; //start PC from 0   
-    cpu.cpsr = 0x000000D3; // SVC mode, IRQ/FIQ disabled
+    cpu.cpsr = 0x000000D3; //SVC mode, IRQ/FIQ disabled
     bus.write_u16(0x04000130, 0x03FF); //set keyinput so all buttons are unpressed (1)
 
     //SDL2 setup
