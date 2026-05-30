@@ -11,7 +11,7 @@ use sdl2::keyboard::Keycode;
 use sdl2::pixels::PixelFormatEnum;
 
 fn main() {
-    let rom: Vec<u8> = std::fs::read("roms/red-rescue-team.gba").unwrap();
+    let rom: Vec<u8> = std::fs::read("roms/wario.gba").unwrap();
     let mut bus = memory_bus::MemoryBus::new(rom); //mem bus setup
 
     //setup gba bios
@@ -104,7 +104,7 @@ fn main() {
                         let cpsr_irq_disabled = (cpu.cpsr >> 7) & 1 == 1;
                         if !cpsr_irq_disabled && ime & 1 == 1 && (ie >> (3 + i)) & 1 == 1 {
                             let if_val = bus.read_u16(0x04000202) as u32;
-                            bus.write_u16(0x04000202, if_val | (1 << (3 + i)));
+                            bus.io[0x202] |= 1u8 << (3 + i);
                             cpu.trigger_irq(&mut bus);
                         }
                     }

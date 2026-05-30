@@ -80,16 +80,16 @@ impl CPU {
         self.cpsr = (self.cpsr & !0x1F) | new_mode;
     }
 
-    // ARM SWI: enter SVC mode and dispatch to the real BIOS handler at 0x00000008.
-    // The BIOS reads the SWI instruction at LR_svc-4 to determine which call to run.
+    //ARM SWI: enter SVC mode and dispatch to the real BIOS handler at 0x00000008.
+    //The BIOS reads the SWI instruction at LR_svc-4 to determine which call to run.
     pub fn execute_swi(&mut self, _bus: &mut MemoryBus, _instruction: u32) {
-        let saved_cpsr = self.cpsr; // capture BEFORE switch_mode modifies cpsr
+        let saved_cpsr = self.cpsr; //capture before switch_mode modifies cpsr
         self.switch_mode(0b10011);
-        self.registers[14] = self.registers[15]; // registers[15] is already pc+4
+        self.registers[14] = self.registers[15]; //registers[15] is already pc+4
         self.r14_svc = self.registers[15];
         self.spsr_svc = saved_cpsr;
-        self.cpsr = (self.cpsr & !0x3F) | 0x13 | (1 << 7); // SVC mode, IRQ disabled
-        self.cpsr &= !(1 << 5); // ARM mode
+        self.cpsr = (self.cpsr & !0x3F) | 0x13 | (1 << 7); //SVC mode, IRQ disabled
+        self.cpsr &= !(1 << 5); //ARM mode
         self.registers[15] = 0x00000008;
     }
 

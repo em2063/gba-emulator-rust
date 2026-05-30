@@ -401,7 +401,7 @@ impl CPU {
         let address = rb_register.wrapping_add(ro_register);
         match opcode {
             0 => {
-                bus.write_u32(address, rd_register);
+                bus.write_u16(address, rd_register);
             }
             1 => {
                 let byte = bus.read_u8(address);
@@ -486,7 +486,7 @@ impl CPU {
         let dest = (instruction >> 8) & 0b111;
         let offset = (instruction & 0xFF) << 2;
 
-        if (instruction >> 11) == 0 {
+        if (instruction >> 11) & 1 == 0 {
             let pc_aligned = (self.registers[15].wrapping_add(2)) & !2;
             self.registers[dest as usize] = pc_aligned.wrapping_add(offset as u32);
         } else {
@@ -608,7 +608,7 @@ impl CPU {
             }
             0b11101 => {
                 let nn = (instruction & 0x7FF) as u32;
-                let temp = self.registers[15].wrapping_add(2) | 1;
+                let temp = self.registers[15] | 1;
                 self.registers[15] = self.registers[14].wrapping_add(nn << 1) & !1; //clear bit 0
                 self.registers[14] = temp;
                 self.cpsr &= !(1 << 5); //clear T flag — switch to ARM mode
@@ -616,9 +616,9 @@ impl CPU {
             _ => self.halt("unimplemented Thumb BL/BLX opcode", instruction as u32),
         }
     }
-    // Thumb SWI: enter SVC mode and dispatch to the real BIOS handler at 0x00000008.
-    // The BIOS binary is loaded so all SWIs (SoftReset, RegisterRamReset, CpuSet, etc.)
-    // are handled there. registers[15] is already pc+2 (incremented before dispatch).
+    //Thumb SWI: enter SVC mode and dispatch to the real BIOS handler at 0x00000008.
+    //the BIOS binary is loaded so all SWIs (SoftReset, RegisterRamReset, CpuSet, etc.)
+    //are handled there. registers[15] is already pc+2 (incremented before dispatch).
     fn execute_swi_thumb(&mut self, _bus: &mut MemoryBus, _instruction: u16) {
         let saved_cpsr = self.cpsr; // capture BEFORE switch_mode modifies cpsr
         self.switch_mode(0b10011);

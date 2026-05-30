@@ -64,8 +64,11 @@ impl PPU {
     //Sets the matching IF bit and fires CPU IRQ if IE/IME/CPSR allow.
     //bit: 0=VBlank, 1=HBlank, 2=VCount
     fn fire_irq(&self, cpu: &mut CPU, bus: &mut MemoryBus, bit: u16) {
-        let if_val = bus.read_u16(0x04000202) as u32;
-        bus.write_u16(0x04000202, if_val | (1u32 << bit));
+        if bit < 8 {
+            bus.io[0x202] |= 1u8 << bit;
+        } else {
+            bus.io[0x203] |= 1u8 << (bit - 8);
+        }
 
         let ie = bus.read_u16(0x04000200);
         let ime = bus.read_u16(0x04000208);

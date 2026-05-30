@@ -108,7 +108,14 @@ impl MemoryBus {
             }
             0x02000000..=0x02FFFFFF => self.ewram[((addr - 0x02000000) & 0x3FFFF) as usize] = value,
             0x03000000..=0x03FFFFFF => self.iwram[((addr - 0x03000000) & 0x7FFF) as usize] = value,
-            0x04000000..=0x040003FE => self.io[(addr - 0x04000000) as usize] = value,
+            0x04000000..=0x040003FE => {
+                let off = (addr - 0x04000000) as usize;
+                if off == 0x202 || off == 0x203 {
+                    self.io[off] &= !value;
+                } else {
+                    self.io[off] = value;
+                }
+            }
             0x05000000..=0x05FFFFFF => {
                 let offset = ((addr - 0x05000000) & 0x3FF & !1) as usize;
                 self.palette[offset] = value;
@@ -139,6 +146,8 @@ impl MemoryBus {
                 let off = (addr - 0x04000000) as usize;
                 if off == 0x04 {
                     self.io[off] = (value & 0xF8) | (self.io[off] & 0x07);
+                } else if off == 0x202 || off == 0x203 {
+                    self.io[off] &= !value;
                 } else {
                     self.io[off] = value;
                 }
@@ -147,7 +156,7 @@ impl MemoryBus {
             0x06000000..=0x06017FFF => {
                 self.vram[(addr - 0x06000000) as usize] = value;
             }
-            0x0E000000..=0x0E00FFFF => self.sram[(addr - 0x0E000000) as usize] = value,
+            0x0E000000..=0x0E00FFFF => self.flash.write(addr, value),
             0x07000000..=0x07FFFFFF => self.oam[((addr - 0x07000000) & 0x3FF) as usize] = value,
             _ => {}
         }
