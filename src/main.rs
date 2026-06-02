@@ -11,7 +11,7 @@ use sdl2::keyboard::Keycode;
 use sdl2::pixels::PixelFormatEnum;
 
 fn main() {
-    let rom: Vec<u8> = std::fs::read("roms/wario.gba").unwrap();
+    let rom: Vec<u8> = std::fs::read("roms/pokemon.gba").unwrap();
     let mut bus = memory_bus::MemoryBus::new(rom); //mem bus setup
 
     //setup gba bios
@@ -44,6 +44,8 @@ fn main() {
     let mut frame = 0u32;
     let mut in_rom = false;
     let mut last_dispcnt = 0u16;
+    let mut lcd_blend = true; //emulate the GBA LCD's pixel bleed (toggle with L)
+    let mut blend_buf = vec![0u8; 240 * 160 * 3]; //scratch for the blend pass
 
     'running: loop {
         //handle events
@@ -53,7 +55,12 @@ fn main() {
                 Event::KeyDown {
                     keycode: Some(k), ..
                 } => {
-                    if let Some(b) = key_to_bit(k) {
+                    if k == Keycode::Backquote {
+                        dump_ppu_regs(&bus, frame); //` dumps the current PPU register state
+                    } else if k == Keycode::L {
+                        lcd_blend = !lcd_blend; //L toggles the LCD blend filter
+                        println!("LCD blend: {}", if lcd_blend { "on" } else { "off" });
+                    } else if let Some(b) = key_to_bit(k) {
                         bus.set_key(b, true);
                     }
                 }
@@ -149,10 +156,166 @@ fn main() {
 
         frame += 1;
 
-        texture.update(None, &ppu.framebuffer, 240 * 3).unwrap();
+        let pixels = if lcd_blend {
+            lcd_blend_frame(&ppu.framebuffer, &mut blend_buf);
+            &blend_buf
+        } else {
+            &ppu.framebuffer[..]
+        };
+        texture.update(None, pixels, 240 * 3).unwrap();
         canvas.copy(&texture, None, None).unwrap();
         canvas.present();
     }
+}
+
+//Light spatial blur approximating the GBA LCD's pixel bleed. Each output pixel is
+//a weighted average of itself (weight 4) and its 4 neighbours (weight 1 each). For
+//a 2-colour dither checkerboard this resolves to the mean of the two shades — i.e.
+//the smooth gradient real hardware shows — while leaving solid areas near-untouched.
+fn lcd_blend_frame(src: &[u8], dst: &mut [u8]) {
+    const W: usize = 240;
+    const H: usize = 160;
+    for y in 0..H {
+        for x in 0..W {
+            for c in 0..3 {
+                let idx = (y * W + x) * 3 + c;
+                let mut sum = src[idx] as u32 * 4;
+                let mut weight = 4u32;
+                if x > 0 {
+                    sum += src[idx - 3] as u32;
+                    weight += 1;
+                }
+                if x < W - 1 {
+                    sum += src[idx + 3] as u32;
+                    weight += 1;
+                }
+                if y > 0 {
+                    sum += src[idx - W * 3] as u32;
+                    weight += 1;
+                }
+                if y < H - 1 {
+                    sum += src[idx + W * 3] as u32;
+                    weight += 1;
+                }
+                dst[idx] = (sum / weight) as u8;
+            }
+        }
+    }
+}
+
+//On-demand snapshot of the PPU control registers. Reads the IO block directly
+//(same layout the PPU itself uses) so it reflects exactly what the renderer sees.
+fn dump_ppu_regs(bus: &memory_bus::MemoryBus, frame: u32) {
+    let r = |off: usize| bus.io[off] as u16 | ((bus.io[off + 1] as u16) << 8);
+
+    let dispcnt = r(0x00);
+    let mode = dispcnt & 0b111;
+    println!("=== PPU register dump @ frame {frame} ===");
+    println!(
+        "DISPCNT {dispcnt:#06x}  mode={mode}  forced_blank={}  obj={}  1d_map={}  win0={} win1={} objwin={}",
+        (dispcnt >> 7) & 1,
+        (dispcnt >> 12) & 1,
+        (dispcnt >> 6) & 1,
+        (dispcnt >> 13) & 1,
+        (dispcnt >> 14) & 1,
+        (dispcnt >> 15) & 1,
+    );
+
+    let mosaic = r(0x4C);
+    println!(
+        "MOSAIC  {mosaic:#06x}  bg={}x{}  obj={}x{}",
+        (mosaic & 0xF) + 1,
+        ((mosaic >> 4) & 0xF) + 1,
+        ((mosaic >> 8) & 0xF) + 1,
+        ((mosaic >> 12) & 0xF) + 1,
+    );
+
+    for bg in 0..4usize {
+        let enabled = (dispcnt >> (8 + bg)) & 1;
+        let cnt = r(0x08 + bg * 2);
+        let hofs = r(0x10 + bg * 4) & 0x1FF;
+        let vofs = r(0x12 + bg * 4) & 0x1FF;
+        let char_block = ((cnt >> 2) & 0b11) as u32;
+        let screen_block = ((cnt >> 8) & 0b11111) as u32;
+        println!(
+            "BG{bg} en={enabled} cnt={cnt:#06x} prio={} char_base={} ({:#08x}) screen_base={} ({:#08x}) 8bpp={} mosaic={} size={} overflow={} scroll=({hofs},{vofs})",
+            cnt & 0b11,
+            char_block,
+            0x06000000 + char_block * 0x4000,
+            screen_block,
+            0x06000000 + screen_block * 0x800,
+            (cnt >> 7) & 1,
+            (cnt >> 6) & 1,
+            (cnt >> 14) & 0b11,
+            (cnt >> 13) & 1,
+        );
+
+        //for enabled text BGs, sample VRAM so we can tell a good tilemap from
+        //corrupt tile graphics: map indices should be small & structured, while
+        //tile bytes reveal whether the pixel data is real or noise.
+        let is_text_bg = mode == 0 || (mode == 1 && bg < 2);
+        if enabled == 1 && is_text_bg {
+            let char_off = char_block as usize * 0x4000;
+            let screen_off = screen_block as usize * 0x800;
+            let is_8bpp = (cnt >> 7) & 1 == 1;
+
+            let mut map = String::new();
+            for e in 0..16usize {
+                let o = screen_off + e * 2;
+                let entry = bus.vram[o] as u16 | ((bus.vram[o + 1] as u16) << 8);
+                map.push_str(&format!("{:04x} ", entry));
+            }
+            println!("     map[0..16] @ {:#08x}: {map}", 0x06000000 + screen_off as u32);
+
+            let tile_bytes = if is_8bpp { 64 } else { 32 };
+            for t in 0..2usize {
+                let mut row = String::new();
+                for b in 0..tile_bytes {
+                    row.push_str(&format!("{:02x}", bus.vram[char_off + t * tile_bytes + b]));
+                    if b % 2 == 1 {
+                        row.push(' ');
+                    }
+                }
+                println!(
+                    "     tile{t} @ {:#08x}: {row}",
+                    0x06000000 + (char_off + t * tile_bytes) as u32
+                );
+            }
+        }
+    }
+
+    let bldcnt = r(0x50);
+    println!(
+        "BLDCNT {bldcnt:#06x} mode={} 1st_tgt={:#04x} 2nd_tgt={:#04x}  BLDALPHA {:#06x}  BLDY {:#06x}",
+        (bldcnt >> 6) & 0b11,
+        bldcnt & 0x3F,
+        (bldcnt >> 8) & 0x3F,
+        r(0x52),
+        r(0x54),
+    );
+    println!(
+        "WININ {:#06x} WINOUT {:#06x}  WIN0H {:#06x} WIN0V {:#06x}  WIN1H {:#06x} WIN1V {:#06x}",
+        r(0x48),
+        r(0x4A),
+        r(0x40),
+        r(0x44),
+        r(0x42),
+        r(0x46),
+    );
+
+    //BG palette banks 0-3 as (r,g,b) 0-31 triples. Lets us see whether adjacent
+    //dither indices (e.g. 9 vs 10) are near-identical shades (smooth fill on real
+    //hardware) or contrasting colours (a wrong/garish palette).
+    let pal = |i: usize| bus.palette[i * 2] as u16 | ((bus.palette[i * 2 + 1] as u16) << 8);
+    for bank in 0..4usize {
+        let mut s = String::new();
+        for c in 0..16usize {
+            let v = pal(bank * 16 + c);
+            s.push_str(&format!("{:02},{:02},{:02}  ", v & 0x1F, (v >> 5) & 0x1F, (v >> 10) & 0x1F));
+        }
+        println!("BGPAL bank{bank} (idx0..15 as r,g,b): {s}");
+    }
+    println!("==========================================");
 }
 
 fn key_to_bit(k: Keycode) -> Option<u8> {
